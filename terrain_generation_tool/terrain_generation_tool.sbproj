@@ -1,6 +1,6 @@
 {
   "Title": "Terrain Generation Tool",
-  "Type": "addon",
+  "Type": "game",
   "Org": "local",
   "Ident": "terrain_generation_tool",
   "Schema": 1,
