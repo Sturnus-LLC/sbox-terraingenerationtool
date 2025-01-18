@@ -15,6 +15,11 @@ using Sturnus.TerrainGenerationTool.Islands;
 using Sturnus.TerrainGenerationTool.Mountainous;
 using Sturnus.TerrainGenerationTool.Volcanic;
 using Sturnus.TerrainGenerationTool.Hills;
+using Sandbox.Utility;
+using System.Threading;
+using Sturnus.TerrainGenerationTool.RiverStream;
+using Sturnus.TerrainGenerationTool.Sea;
+using Sandbox.Services;
 
 [Dock( "Editor", "Terrain Generation Tool", "terrain" )]
 public class TerrainGenerationTool : Widget
@@ -23,13 +28,24 @@ public class TerrainGenerationTool : Widget
 	public string GenerationLocalPath { get; set; } = "\\TerrainGenerationTool\\";
 	public string ExportPath { get; set; } = Project.Current.RootDirectory + "\\Assets\\";
 
-	string[,] TerrainShapeArray = new string[4, 2]
+	string[,] TerrainShapeArray = new string[6, 2]
 	{
 		{ "Island", "circle" },
 		{ "Mountainous", "terrain" },
 		{ "Volcanic", "volcano" },
-		{ "Normal", "square" }
+		{ "Normal", "square" },
+		{ "Realistic", "public" },
+		{ "Sea", "water" }
 	};
+
+	string[,] TerrainSubShapeArray { get; set; } = new string[4, 2]
+	{
+		{ "Archipelagos", "circle" },
+		{ "Atoll", "terrain" },
+		{ "Islets", "volcano" },
+		{ "Oceanic", "square" }
+	};
+
 	enum TerrainDimensions : int
 	{
 		x512 = 512,
@@ -44,21 +60,41 @@ public class TerrainGenerationTool : Widget
 		Island		= 1,
 		Mountainous = 2,
 		Volcanic	= 3,
-		Normal		= 4
+		Normal		= 4,
+		Realistic	= 5,
+		Sea			= 6
 	}
 	TerrainDimensions TerrainDimensionsEnum { get; set; } = TerrainDimensions.x512;
 	TerrainShapeEnum TerrainShapeEnumSelect { get; set; } = TerrainShapeEnum.Island;
 	[Range( 0.1f, 1f, 0.01f, true, true )] float TerrainMaxHeight { get; set; } = 0.5f;
+	[Range( 0.1f, 1f, 0.01f, true, true )] float TerrainPlaneScale { get; set; } = 0.5f;
 	long TerrainSeed { get; set; } = 1234567890;
-	[Range( 1, 20, 1, true, true )] int SmoothingPasses { get; set; } = 10;
-	bool DomainWarping { get; set; } = true;
-	[Range( 0.1f, 1f, 0.01f, true, true )] float DomainWarpingSize { get; set; } = 0.25f;
-	[Range( 0.1f, 1f, 0.01f, true, true )] float DomainWarpingStrength { get; set; } = 0.15f;
-	bool ErosionSimulation { get; set; } = false;
-	Gradient SplatMapGradient = new Gradient( new Gradient.ColorFrame( 0.0f, Color.Cyan ), new Gradient.ColorFrame( 0.2f, Color.Red ), new Gradient.ColorFrame( 0.4f, Color.Yellow ), new Gradient.ColorFrame( 0.5f, Color.Green ), new Gradient.ColorFrame( 0.65f, Color.White ), new Gradient.ColorFrame( 0.8f, Color.Magenta ) );
+	[Range( 0, 20, 1, true, true )] int SmoothingPasses { get; set; } = 10;
+	[Group( "Domain Warping" )] bool DomainWarping { get; set; } = true;
+	[Group( "Domain Warping" )][Range( 0.1f, 1f, 0.01f, true, true )] float DomainWarpingSize { get; set; } = 0.25f;
+	[Group( "Domain Warping" )][Range( 0.1f, 1f, 0.01f, true, true )] float DomainWarpingStrength { get; set; } = 0.15f;
+	bool ErosionSimulation { get; set; } = true;
+	[Range( 1f, 25f, 1f, true, true )] int NoiseLayerStacks { get; set; } = 1;
+
+	///
+	/// River Carving Variables
+	///
+	[Group( "River & Stream Carving" )] bool RiverCarvingBool { get; set; } = true;
+	[Group( "River & Stream Carving" )][Range( 0.5f, 10f, 0.1f, true, true )] float RiverCarvingFrequency { get; set; } = 2f;
+	[Group( "River & Stream Carving" )][Range( 0.01f, 5f, 0.01f, true, true )] float RiverCarvingStrength { get; set; } = 0.5f;
+	[Group( "River & Stream Carving" )][Range( 0.01f, 1f, 0.01f, true, true )] float RiverCarvingDepth { get; set; } = 0.03f;
+	[Group( "River & Stream Carving" )][Range( 0.001f, 2f, 0.01f, true, true )] float RiverCarvingWidth { get; set; } = 0.025f;
+	[Group( "River & Stream Carving" )][Range( 0.05f, 1f, 0.01f, true, true )] float RiverCarvingSpacing { get; set; } = 0.15f;
+	[Group( "River & Stream Carving" )][Range( 0.01f, 1f, 0.01f, true, true )] float RiverCarvingTurbulenceStrength { get; set; } = 0.08f;
+	[Group( "River & Stream Carving" )][Range( 0.01f, 10f, 0.01f, true, true )] float RiverCarvingTurbulenceFrequency { get; set; } = 5f;
+
+	Gradient SplatMapGradient = new Gradient( new Gradient.ColorFrame( 0.0f, Color.Cyan ), new Gradient.ColorFrame( 0.25f, Color.Red ), new Gradient.ColorFrame( 0.5f, Color.Yellow ), new Gradient.ColorFrame( 0.75f, Color.Green ) );
 	SKColor[] _splatcolors { get; set; }
+
+
 	float[] _splatthresholds = { 0f, 0.01f, 0.02f, 0.03f, 0.04f, 0.05f };
 	float[,] _heightmap;
+	float[,] _splatmap;
 	//byte[] _heightmap_image;
 
 	Texture _preview_image_texture;
@@ -66,12 +102,10 @@ public class TerrainGenerationTool : Widget
 	Texture _preview_splatmap_texture;
 	Editor.TextureEditor.Preview PreviewSplatmap;
 
-	SceneRenderingWidget RenderCanvas;
+	/*SceneRenderingWidget RenderCanvas;
 	CameraComponent Camera;
 	Gizmo.Instance GizmoInstance;
-	Terrain _terrain;
-
-	ushort[] _heightmap_ushort;
+	Terrain _terrain;*/
 
 	public TerrainGenerationTool( Widget parent ) : base( parent, false )
 	{
@@ -82,8 +116,10 @@ public class TerrainGenerationTool : Widget
 		SplatMapGradient.Blending = Gradient.BlendMode.Stepped;
 		MinimumSize = 500;
 		Layout = Layout.Column();
-		Layout.Margin = 20;
+		
+		Layout.Margin = 10;
 		Layout.Spacing = 5;
+
 		var ShapeLabel = Layout.Add( new Label( "Terrain Shape" ) );
 		var ShapeArray = Layout.Add( new SegmentedControl( ) );
 		for ( int i = 0; i < TerrainShapeArray.GetLength( 0 ); i++ )
@@ -105,14 +141,15 @@ public class TerrainGenerationTool : Widget
 		{
 			Enum.TryParse<TerrainShapeEnum>( ShapeArray.Selected, out TerrainShapeEnum terrain_out );
 			TerrainShapeEnumSelect = terrain_out;
-			Log.Info( TerrainShapeEnumSelect );
 		};
-		Layout.AddSpacingCell( 5 );
 		var DimensionsLabel = Layout.Add( new Label( "Terrain Dimensions" ) );
 		var DimensionsEnum = Layout.Add( new EnumControlWidget( this.GetSerialized().GetProperty( nameof( TerrainDimensionsEnum ) ) ) );
 		Layout.AddSpacingCell( 5 );
 		var MaxHeightLabel = Layout.Add( new Label( "Max Height (relative)" ) );
 		var MaxHeightFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainMaxHeight ) ) ) );
+		Layout.AddSpacingCell( 5 );
+		var TerrainPlaneScaleLabel = Layout.Add( new Label( "Terrain Plane Scale" ) );
+		var TerrainPlaneScaleNumber = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainPlaneScale ) ) ) );
 		Layout.AddSpacingCell( 5 );
 		var TerrainSeedLabel = Layout.Add( new Label( "Terrain Seed" ) );
 		var TerrainSeedNumber = Layout.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( TerrainSeed ) ) ) );
@@ -120,14 +157,14 @@ public class TerrainGenerationTool : Widget
 		var SmoothingPassesLabel = Layout.Add( new Label( "Smoothing Passes" ) );
 		var SmoothingPassesNumber = Layout.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( SmoothingPasses ) ) ) );
 		Layout.AddSpacingCell( 5 );
+		var NoiseLayerStacksLabel = Layout.Add( new Label( "Noise Layer Stacks" ) );
+		var NoiseLayerStacksNumber = Layout.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( NoiseLayerStacks ) ) ) );
+		Layout.AddSpacingCell( 5 );
 		var SplatMapColorsLabel = Layout.Add( new Label( "Splatmap Colors/Threshold" ) );
 		var SplatMapColorsNumber = Layout.Add( new GradientControlWidget( this.GetSerialized().GetProperty( nameof( SplatMapGradient ) ) ) );
 		Layout.AddSpacingCell( 5 );
 		var DomainWarpingLabel = Layout.Add( new Label( "Domain Warping" ) );
 		var DomainWarpingBool = Layout.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarping ) ) ) );
-		/*Layout.AddSpacingCell( 5 );
-		var ErosionSimulationLabel = Layout.Add( new Label( "Erosion Simulation" ) );
-		var ErosionSimulationBool = Layout.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( ErosionSimulation ) ) ) );*/
 		Layout.AddSpacingCell( 5 );
 		if ( DomainWarping )
 		{
@@ -163,79 +200,162 @@ public class TerrainGenerationTool : Widget
 				}
 			};
 		}
-
+		Layout.AddSpacingCell( 5 );
+		var ErosionSimulationLabel = Layout.Add( new Label( "Erosion Simulation" ) );
+		var ErosionSimulationBool = Layout.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( ErosionSimulation ) ) ) );
 		if ( ErosionSimulation )
 		{
-			/*var DomainWarpingSizeLabel = Layout.Add( new Label( "Domain Warping (Size)" ) );
-			var DomainWarpingSizeFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingSize ) ) ) );
-			var DomainWarpingStrengthLabel = Layout.Add( new Label( "Domain Warping (Strength)" ) );
-			var DomainWarpingStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingStrength ) ) ) );
-			DomainWarpingBool.MouseClick += () =>
-			{
-				if ( ErosionSimulation )
-				{
-					DomainWarpingSizeLabel.Enabled = true;
-					DomainWarpingSizeFloat.Enabled = true;
-					DomainWarpingSizeLabel.Visible = true;
-					DomainWarpingSizeFloat.Visible = true;
+		}
 
-					DomainWarpingStrengthLabel.Enabled = true;
-					DomainWarpingStrengthFloat.Enabled = true;
-					DomainWarpingStrengthLabel.Visible = true;
-					DomainWarpingStrengthFloat.Visible = true;
+		Layout.AddSpacingCell( 5 );
+		var RiverCarvingLabel = Layout.Add( new Label( "River Carving" ) );
+		var RiverCarvingBoolControl = Layout.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingBool ) ) ) );
+
+		if ( RiverCarvingBool )
+		{
+			//var LayoutRow1 = Layout.AddRow( 1 );
+			/*var RiverCarvingFrequencyLabel = Layout.Add( new Label( "River Frequency" ) );
+			var RiverCarvingFrequencyFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingFrequency ) ) ) );
+			var RiverCarvingDepthLabel = Layout.Add( new Label( "River Depth (Relative)" ) );
+			var RiverCarvingDepthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingDepth ) ) ) );
+			var RiverCarvingWidthLabel = Layout.Add( new Label( "River Width (Relative)" ) );
+			var RiverCarvingWidthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingWidth ) ) ) );
+			var RiverCarvingTurbulenceStrengthLabel = Layout.Add( new Label( "Turbulence Strength" ) );
+			var RiverCarvingTurbulenceStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingTurbulenceStrength ) ) ) );
+			*/
+
+			var RiverCarvingFrequency = Layout.Add( new Label( "RiverCarvingFrequency" ));
+			var RiverCarvingFrequencyFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingFrequency ) ) ) );
+			var RiverCarvingStrength = Layout.Add( new Label("RiverCarvingStrength"));
+			var RiverCarvingStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingStrength))));
+			var RiverCarvingDepth = Layout.Add( new Label("RiverCarvingDepth"));
+			var RiverCarvingDepthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingDepth))));
+			var RiverCarvingWidth = Layout.Add( new Label("RiverCarvingWidth"));
+			var RiverCarvingWidthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingWidth))));
+			var RiverCarvingSpacing = Layout.Add( new Label("RiverCarvingSpacing"));
+			var RiverCarvingSpacingFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingSpacing))));
+			var RiverCarvingTurbulenceStrength = Layout.Add( new Label("RiverCarvingTurbulenceStrength"));
+			var RiverCarvingTurbulenceStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceStrength))));
+			var RiverCarvingTurbulenceFrequency = Layout.Add( new Label("RiverCarvingTurbulenceFrequency"));
+			var RiverCarvingTurbulenceFrequencyFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceFrequency))));
+
+
+
+			RiverCarvingBoolControl.MouseClick += () =>
+			{
+				Log.Info( $"RiverStreamCarving: {RiverCarvingBool}" );
+				if ( RiverCarvingBool )
+				{
+					RiverCarvingFrequency.Enabled = true;
+					RiverCarvingFrequencyFloat.Enabled = true;
+					RiverCarvingStrength.Enabled = true;
+					RiverCarvingStrengthFloat.Enabled = true;
+					RiverCarvingDepth.Enabled = true;
+					RiverCarvingDepthFloat.Enabled = true;
+					RiverCarvingWidth.Enabled = true;
+					RiverCarvingWidthFloat.Enabled = true;
+					RiverCarvingSpacing.Enabled = true;
+					RiverCarvingSpacingFloat.Enabled = true;
+					RiverCarvingTurbulenceStrength.Enabled = true;
+					RiverCarvingTurbulenceStrengthFloat.Enabled = true;
+					RiverCarvingTurbulenceFrequency.Enabled = true;
+					RiverCarvingTurbulenceFrequencyFloat.Enabled = true;
+					RiverCarvingFrequency.Visible = true;
+					RiverCarvingFrequencyFloat.Visible = true;
+					RiverCarvingStrength.Visible = true;
+					RiverCarvingStrengthFloat.Visible = true;
+					RiverCarvingDepth.Visible = true;
+					RiverCarvingDepthFloat.Visible = true;
+					RiverCarvingWidth.Visible = true;
+					RiverCarvingWidthFloat.Visible = true;
+					RiverCarvingSpacing.Visible = true;
+					RiverCarvingSpacingFloat.Visible = true;
+					RiverCarvingTurbulenceStrength.Visible = true;
+					RiverCarvingTurbulenceStrengthFloat.Visible = true;
+					RiverCarvingTurbulenceFrequency.Visible = true;
+					RiverCarvingTurbulenceFrequencyFloat.Visible = true;
 				}
 				else
 				{
-					DomainWarpingSizeLabel.Enabled = false;
-					DomainWarpingSizeFloat.Enabled = false;
-					DomainWarpingSizeLabel.Visible = false;
-					DomainWarpingSizeFloat.Visible = false;
+					RiverCarvingFrequency.Enabled = false;
+					RiverCarvingFrequencyFloat.Enabled = false;
+					RiverCarvingStrength.Enabled = false;
+					RiverCarvingStrengthFloat.Enabled = false;
+					RiverCarvingDepth.Enabled = false;
+					RiverCarvingDepthFloat.Enabled = false;
+					RiverCarvingWidth.Enabled = false;
+					RiverCarvingWidthFloat.Enabled = false;
+					RiverCarvingSpacing.Enabled = false;
+					RiverCarvingSpacingFloat.Enabled = false;
+					RiverCarvingTurbulenceStrength.Enabled = false;
+					RiverCarvingTurbulenceStrengthFloat.Enabled = false;
+					RiverCarvingTurbulenceFrequency.Enabled = false;
+					RiverCarvingTurbulenceFrequencyFloat.Enabled = false;
 
-					DomainWarpingStrengthLabel.Enabled = false;
-					DomainWarpingStrengthFloat.Enabled = false;
-					DomainWarpingStrengthLabel.Visible = false;
-					DomainWarpingStrengthFloat.Visible = false;
+					RiverCarvingFrequency.Visible = false;
+					RiverCarvingFrequencyFloat.Visible = false;
+					RiverCarvingStrength.Visible = false;
+					RiverCarvingStrengthFloat.Visible = false;
+					RiverCarvingDepth.Visible = false;
+					RiverCarvingDepthFloat.Visible = false;
+					RiverCarvingWidth.Visible = false;
+					RiverCarvingWidthFloat.Visible = false;
+					RiverCarvingSpacing.Visible = false;
+					RiverCarvingSpacingFloat.Visible = false;
+					RiverCarvingTurbulenceStrength.Visible = false;
+					RiverCarvingTurbulenceStrengthFloat.Visible = false;
+					RiverCarvingTurbulenceFrequency.Visible = false;
+					RiverCarvingTurbulenceFrequencyFloat.Visible = false;
 				}
-			};*/
+			};
+		}
+		else
+		{
+			//RiverStreamCarving = !RiverStreamCarving;
 		}
 
 		var GenerateButton = Layout.Add( new Button.Primary( "Generate", "auto_awesome", this ) );
 
+		var LayoutRow = Layout.AddRow( 1 );
 		//var PreviewLabel = Layout.Add( new Label( "Preview" ) ); //Will attempt to get this working in a future update.
-		/*var _image_preview = new Editor.TextureEditor.Preview( this );
+		var _image_preview = new Editor.TextureEditor.Preview( this );
 		_image_preview.Texture = _preview_image_texture;
 		_image_preview.Size = new Vector2( 512, 512 );
-		PreviewImage = Layout.Add( _image_preview, 50 );
+		PreviewImage = LayoutRow.Add( _image_preview, 50 );
 
 		var _splatmap_preview = new Editor.TextureEditor.Preview( this );
 		_splatmap_preview.Texture = _preview_splatmap_texture;
 		_splatmap_preview.Size = new Vector2( 512, 512 );
-		PreviewSplatmap = Layout.Add( _splatmap_preview, 50 );*/
+		PreviewSplatmap = LayoutRow.Add( _splatmap_preview, 50 );
 
-		RenderCanvas = new SceneRenderingWidget( this );
+		/*RenderCanvas = new SceneRenderingWidget( this );
 		RenderCanvas.OnPreFrame += OnPreFrame;
 		RenderCanvas.FocusMode = FocusMode.Click;
 		RenderCanvas.Scene = Scene.CreateEditorScene();
 		RenderCanvas.Scene.SceneWorld.AmbientLightColor = Theme.Blue * 0.4f;
-
+		_terrain = new GameObject( RenderCanvas.Scene,true, "terrain" ).GetOrAddComponent<Terrain>( true );
+		//_terrain.Storage.SetResolution( 512 );
+		_terrain.TerrainSize = 5007;
+		_terrain.TerrainHeight = 1000;
 		using ( RenderCanvas.Scene.Push() )
 		{
 			Camera = new GameObject( true, "camera" ).GetOrAddComponent<CameraComponent>( false );
 			Camera.BackgroundColor = Theme.Grey;
-			Camera.ZFar = 4096;
+			Camera.ZFar = 100000;
 			Camera.Enabled = true;
-			Camera.WorldPosition = new Vector3( -1000, 0, 1000 );
-			Camera.LocalRotation = new Angles( 45, 0, 0 );
+			Camera.WorldPosition = new Vector3( -2000, 0, 2000 );
+			Camera.LocalRotation = new Angles( 30, 0, 0 );
 			RenderCanvas.Camera = Camera;
-			_terrain = new GameObject( true, "terrain" ).GetOrAddComponent<Terrain>( true );
-			
 		}
 
 		GizmoInstance = RenderCanvas.GizmoInstance;
-		Layout.Add( RenderCanvas,1 ); //Will attempt to get this working in a future update.
+		Layout.Add( RenderCanvas,1 ); //Will attempt to get this working in a future update.*/
 
 		var ExportButton = Layout.Add( new Button( "Export", "file_download", this ) );
 		ExportButton.Tint = "#41AF20";
+
+		var ApplyButton = Layout.Add( new Button( "Apply To Terrain", "file_upload", this ) );
+		ApplyButton.Tint = "#AF2020";
 
 		GenerateButton.Clicked += () =>
 		{
@@ -250,71 +370,170 @@ public class TerrainGenerationTool : Widget
 			_splatcolors = _splatmapgradients.ToArray();
 			if ( TerrainShapeEnumSelect == TerrainShapeEnum.Island )
 			{
-				_heightmap = GenerateHeightmap( (int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				_heightmap = GenerateStackedNoise(
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
+				TerrainSeed,
+				NoiseLayerStacks,
+				1.0f,
+				2.0f,
+				1.0f,
+				0.5f,
 				( x, y ) => IslandShapes.DefaultIsland( x, y,
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
 				TerrainSeed,
 				DomainWarping,
 				DomainWarpingSize,
 				DomainWarpingStrength ),
 				TerrainMaxHeight,
-				SmoothingPasses);
-				
+				SmoothingPasses,
+				TerrainPlaneScale);				
 			}
 			if ( TerrainShapeEnumSelect == TerrainShapeEnum.Mountainous )
 			{
-				_heightmap = GenerateHeightmap( (int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				_heightmap = GenerateStackedNoise(
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
+				TerrainSeed,
+				NoiseLayerStacks,
+				1.0f,
+				2.0f,
+				1.0f,
+				0.5f,
 				( x, y ) => MountainousShapes.DefaultMountain( x, y,
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
 				TerrainSeed,
 				DomainWarping,
 				DomainWarpingSize,
 				DomainWarpingStrength ),
 				TerrainMaxHeight,
-				SmoothingPasses );
+				SmoothingPasses,
+				TerrainPlaneScale );
 			}
 			if ( TerrainShapeEnumSelect == TerrainShapeEnum.Volcanic )
 			{
-				_heightmap = GenerateHeightmap( (int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				_heightmap = GenerateStackedNoise(
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
+				TerrainSeed,
+				NoiseLayerStacks,
+				1.0f,
+				2.0f,
+				1.0f,
+				0.5f,
 				( x, y ) => VolcanicShapes.DefaultVolcanic( x, y,
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
 				TerrainSeed,
 				DomainWarping,
 				DomainWarpingSize,
 				DomainWarpingStrength ),
 				TerrainMaxHeight,
-				SmoothingPasses );
+				SmoothingPasses,
+				TerrainPlaneScale );
 			}
 			if ( TerrainShapeEnumSelect == TerrainShapeEnum.Normal )
 			{
-				_heightmap = GenerateHeightmap( (int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				_heightmap = GenerateStackedNoise(
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
+				TerrainSeed,
+				NoiseLayerStacks,
+				1.0f,
+				2.0f,
+				1.0f,
+				0.5f,
 				( x, y ) => HillsShapes.DefaultHills( x, y,
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
-				(int)Enum.Parse( typeof( TerrainDimensions ), TerrainDimensionsEnum.ToString() ),
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
 				TerrainSeed,
 				DomainWarping,
 				DomainWarpingSize,
 				DomainWarpingStrength ),
 				TerrainMaxHeight,
-				SmoothingPasses );
+				SmoothingPasses,
+				TerrainPlaneScale );
+			}
+			if ( TerrainShapeEnumSelect == TerrainShapeEnum.Realistic )
+			{
+				_heightmap = GenerateStackedNoise(
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
+				TerrainSeed,
+				NoiseLayerStacks,
+				1.0f,
+				2.0f,
+				1.0f,
+				0.5f,
+				( x, y ) => RealisticShapes.DefaultRealistic( x, y,
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
+				TerrainSeed,
+				DomainWarping,
+				DomainWarpingSize,
+				DomainWarpingStrength ),
+				TerrainMaxHeight,
+				SmoothingPasses,
+				TerrainPlaneScale );
+			}
+			if ( TerrainShapeEnumSelect == TerrainShapeEnum.Sea )
+			{
+				_heightmap = GenerateStackedNoise(
+				(int)TerrainDimensionsEnum,
+				(int)TerrainDimensionsEnum,
+				TerrainSeed,
+				NoiseLayerStacks,
+				1.0f,
+				2.0f,
+				1.0f,
+				0.5f,
+				( x, y ) => SeaShapes.SeaBed(
+					x, y, (int)TerrainDimensionsEnum, (int)TerrainDimensionsEnum, TerrainSeed,
+					depthScale: 0.4f, // Adjust the overall depth
+					waveFrequency: 0.5f, // Frequency of base ripples
+					waveAmplitude: 0.1f, // Height of ripples
+					randomVariation: 0.02f, // Subtle randomness
+					distortionFrequency: 0.03f, // Frequency for distortion
+					distortionStrength: 0.05f // Strength of distortion
+				),
+				TerrainMaxHeight,
+				SmoothingPasses,
+				TerrainPlaneScale );
 			}
 
 			if ( ErosionSimulation )
 			{
-				_heightmap = ApplyHydraulicErosion( _heightmap, iterations: 10, rainRate: 0.05f, evaporationRate: 0.005f, sedimentCapacity: 0.5f );
+
 			}
 
-			_heightmap_ushort = ConvertFloatArrayToUShortArray( _heightmap );
-			_terrain.Storage.HeightMap = _heightmap_ushort;
+			if ( RiverCarvingBool )
+			{
+				_heightmap = AddTurbulenceForRivers(
+				_heightmap,
+				seed: TerrainSeed,
+				riverFrequency: RiverCarvingFrequency, // Frequency of rivers
+				riverWidth: RiverCarvingWidth, // Width of rivers
+				riverDepth: RiverCarvingDepth, // Depth of rivers
+				turbulenceFrequency: RiverCarvingTurbulenceFrequency, // Turbulence frequency
+				turbulenceStrength: RiverCarvingTurbulenceStrength, // Turbulence strength
+				minRiverSpacing: RiverCarvingSpacing // Minimum spacing between rivers
+			);
+			}
+
+
+			if ( _heightmap == null )
+			{
+				Log.Error( "Heightmap is not generated. Aborting." );
+				return;
+			}
+
+			_splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
 
 			GeneratePreviewFile( GenerationPath );
+
+			//_terrain.HeightMap.Update( _heightmap_byte ,0,0, (int)TerrainDimensionsEnum , (int)TerrainDimensionsEnum );
 
 			string preview_image_path = Path.Combine( GenerationLocalPath, $"TerrainGenerationUtility_preview.png" );
 			_preview_image_texture = Texture.Load( Editor.FileSystem.Mounted, preview_image_path );
@@ -324,17 +543,45 @@ public class TerrainGenerationTool : Widget
 			_preview_splatmap_texture = Texture.Load( Editor.FileSystem.Mounted, preview_splatmap_path );
 			PreviewSplatmap.Texture = _preview_splatmap_texture;
 
+			
+
 		};
 
 		ExportButton.Clicked += () =>
 		{
 			GenerateImageFiles( ExportPath );
+			var PopUp = new PopupWindow( "Export Complete", $"Files exported to {ExportPath}", "Okay" );
+			PopUp.Show();
 		};
+
+		ApplyButton.Clicked += () =>
+		{
+
+
+			//FirstTerrain.ControlMap.Update( ConvertRawFloatArrayToByteArray( _splatmap), 0, 0, (int)TerrainDimensionsEnum, (int)TerrainDimensionsEnum);
+			IDictionary<string, Action> WarnDiaglog = new Dictionary<string, Action>(); ;
+			WarnDiaglog.Add( "Apply", UpdateTerrain );
+			var PopUpWarn = new PopupWindow( "Warning: Terrain Override", "This will override your current scene's terrain data.","Cancel", WarnDiaglog );
+			PopUpWarn.Show();
+		};
+		
 		Layout.AddStretchCell();
 		Show();
+
 	}
 
-	ISceneTest current;
+	private void UpdateTerrain()
+	{
+		var ActiveScene = Editor.SceneEditorSession.Active.Scene;
+		var FirstTerrain = ActiveScene.GetAllComponents<Terrain>().FirstOrDefault();
+		FirstTerrain.SyncGPUTexture();
+		FirstTerrain.HeightMap.Update( ConvertRawFloatArrayToByteArray( _heightmap ), 0, 0, (int)TerrainDimensionsEnum, (int)TerrainDimensionsEnum );
+		
+		FirstTerrain.Storage.HeightMap = ConvertFloatArrayToUShortArray( _heightmap );
+		FirstTerrain.UpdateMaterialsBuffer();
+	}
+
+	/*ISceneTest current;
 	private void OnPreFrame()
 	{
 		// TODO: We shouldn't be accessing SceneCamera but all this shit needs it
@@ -357,31 +604,42 @@ public class TerrainGenerationTool : Widget
 		Gizmo.Draw.Plane( Vector3.Zero, Vector3.Up );
 
 
-		for ( var row = 0; row < 32; row++ )
+		for ( var row = 0; row < 64f; row++ )
 		{
-			var x = row * 1f;
+			var x = row * 64f;
 			Vector3 last = 0.0f;
 
 			using ( Gizmo.Scope( $"Line{row}", Transform.Zero.WithPosition( new Vector3( 0, 0, 0 ) ) ) )
 			{
-				Gizmo.Draw.LineThickness = 1;
+				//Gizmo.Draw.LineThickness = 1;
 				Gizmo.Draw.Color = Color.White;
-
-				for ( var i = 0; i < 32; i++ )
+				/*for ( var i = 0; i < 64f; i++ )
 				{
-					var y = i * 10.0f;
-					var p = new Vector3( x, y, 0f );
+					var y = i * 64f;
+					//var p = new Vector3( x, y, _heightmap.GetLength( 0 )[i] );
 
 					if ( i > 0 )
 					{
-						Gizmo.Draw.Line( last, p );
+						//Gizmo.Draw.Line( last, p );
+						BBox bBox = new BBox();
+						Gizmo.Draw.SolidBox( BBox.FromPositionAndSize( new Vector3( i * 100, i * 100, _heightmap[i, i] ), 100 ) );
 					}
 
-					last = p;
+					//last = p;
+				}*/
+
+				/*for ( int yy = 0; yy < 64; yy++ )
+				{
+					for ( int xx = 0; xx < 64; xx++ )
+					{
+						Gizmo.Draw.SolidBox( BBox.FromPositionAndSize( new Vector3( xx, yy, _heightmap[xx/4, yy/4] ), 10 ) );
+
+					}
 				}
+
 			}
 		}
-	}
+	}*/
 
 	private void GeneratePreviewFile( string path )
 	{
@@ -392,8 +650,8 @@ public class TerrainGenerationTool : Widget
 
 		SKBitmap image = HeightmapToImage( _heightmap );
 		SaveImage( image, previewfile );
-		float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
-		SKBitmap splat = SplatmapToImage( splatmap, _splatcolors );
+		//float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
+		SKBitmap splat = SplatmapToImage( _splatmap, _splatcolors );
 		SaveSplatmapAsPng( splat, splatfile );
 	}
 
@@ -401,6 +659,7 @@ public class TerrainGenerationTool : Widget
 	{
 		string UsingDomainWarping = "";
 		string UsingErosionEmulation = "";
+		string UsingWaterCarving = "";
 
 		if ( DomainWarping )
 		{
@@ -412,155 +671,303 @@ public class TerrainGenerationTool : Widget
 			UsingErosionEmulation = "_erosion";
 		}
 
+		if ( RiverCarvingBool )
+		{
+			UsingWaterCarving = "_watercarving";
+		}
+
 		//Create TerrainGenerationTool folder if it doesn't exist.
 		Directory.CreateDirectory( output_path );
-		string rawfile = Path.Combine( output_path, $"TerrainGenerationUtility_export_{TerrainShapeEnumSelect}{UsingDomainWarping}{UsingErosionEmulation}.raw" );
-		string previewfile = Path.Combine( output_path, $"TerrainGenerationUtility_preview_{TerrainShapeEnumSelect}{UsingDomainWarping}{UsingErosionEmulation}.png" );
-		string splatfile = Path.Combine( output_path, $"TerrainGenerationUtility_splat_export_{TerrainShapeEnumSelect}{UsingDomainWarping}{UsingErosionEmulation}.png" );
+		string rawfile = Path.Combine( output_path, $"TerrainGenerationUtility_export_{TerrainShapeEnumSelect}{UsingDomainWarping}{UsingErosionEmulation}{UsingWaterCarving}.raw" );
+		string previewfile = Path.Combine( output_path, $"TerrainGenerationUtility_preview_{TerrainShapeEnumSelect}{UsingDomainWarping}{UsingErosionEmulation}{UsingWaterCarving}.png" );
+		string splatfile = Path.Combine( output_path, $"TerrainGenerationUtility_splat_export_{TerrainShapeEnumSelect}{UsingDomainWarping}{UsingErosionEmulation}{UsingWaterCarving}.png" );
 
 		//Export RAW HeightMap file
 		SaveRaw( _heightmap, rawfile );
+		Log.Info( $"Raw file generated! - {rawfile}" );
 		//Generate & Export Preview image for widget
 		SKBitmap image = HeightmapToImage( _heightmap );
 		SaveImage( image, previewfile );
+		Log.Info( $"HeightMap preview file generated! - {previewfile}" );
 		//Generate & Export SplatMap image
 		float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
 		SKBitmap splat = SplatmapToImage( splatmap, _splatcolors );
 		SaveSplatmapAsPng( splat, splatfile );
+		Log.Info( $"Splatmap file generated! - {splatfile}" );
+
+		Log.Info( $"All export files saved! {output_path}" );
 	}
 
-	// Generates a simple procedural heightmap
 	public float[,] GenerateHeightmap( int width, int height, Func<int, int, float> generator, float maxHeight, int smoothpasses )
 	{
 		float[,] heightmap = new float[width, height];
 		float actualMaxHeight = float.MinValue;
 
-		for ( int y = 0; y < height; y++ )
+		// Use parallel processing to generate heightmap
+		object maxLock = new object(); // Lock object for thread safety
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
-				heightmap[x, y] = generator( x, y );
-				if ( heightmap[x, y] > actualMaxHeight )
+				float value = generator( x, y );
+				heightmap[x, y] = value;
+
+				// Update actual max height (thread-safe)
+				lock ( maxLock )
 				{
-					actualMaxHeight = heightmap[x, y];
+					if ( value > actualMaxHeight )
+					{
+						actualMaxHeight = value;
+					}
 				}
 			}
-		}
+		} );
 
-		// Scale all values down by the actual max height and up to the specified max height
-		for ( int y = 0; y < height; y++ )
+		// Scale all values by the actual max height and up to the specified max height
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
 				heightmap[x, y] = (heightmap[x, y] / actualMaxHeight) * maxHeight;
 			}
-		}
+		} );
 
-		return SmoothHeightmap( heightmap, smoothpasses );
+		// Apply smoothing if needed
+		if ( smoothpasses > 0 )
+		{
+			return SmoothHeightmap( heightmap, smoothpasses );
+		}
+		else
+		{
+			return heightmap;
+		}
 	}
 
-	public static float[,] ApplyHydraulicErosion( float[,] heightmap, int iterations, float rainRate, float evaporationRate, float sedimentCapacity )
+	public static float[,] GenerateStackedNoise(
+		int width,
+		int height,
+		long seed,
+		int layers,
+		float initialFrequency,
+		float frequencyMultiplier,
+		float initialAmplitude,
+		float amplitudeMultiplier,
+		Func<int, int, float> shapeFunction, // Shape function applied after stacking noise
+		float maxHeight,
+		int smoothingPasses,
+		float terrainPlaneScale // New variable to scale the noise
+
+	)
+	{
+		// Initialize the heightmap with zeros
+		float[,] heightmap = new float[width, height];
+
+		// Random offset generator for noise layers
+		Random random = new Random( (int)(seed & 0xFFFFFFFF) );
+		float[] xOffsets = new float[layers];
+		float[] yOffsets = new float[layers];
+
+		for ( int i = 0; i < layers; i++ )
+		{
+			xOffsets[i] = random.Next( -100000, 100000 ) / 1000.0f;
+			yOffsets[i] = random.Next( -100000, 100000 ) / 1000.0f;
+		}
+
+		// Adjust frequency based on TerrainPlaneScale
+		float scaleFactor = Math.Clamp( terrainPlaneScale, 0.01f, 1.0f );
+
+		// Multithreaded noise generation
+		Parallel.For( 0, height, y =>
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				float value = 0.0f;
+
+				for ( int layer = 0; layer < layers; layer++ )
+				{
+					float frequency = initialFrequency * MathF.Pow( frequencyMultiplier, layer ) / scaleFactor;
+					float amplitude = initialAmplitude * MathF.Pow( amplitudeMultiplier, layer );
+
+					// Normalized coordinates adjusted by scale factor
+					float nx = (x / (float)width) * frequency;
+					float ny = (y / (float)height) * frequency;
+
+					// Apply random offsets
+					nx += xOffsets[layer];
+					ny += yOffsets[layer];
+
+					// Generate noise
+					float noiseValue = OpenSimplex2S.Noise2( (seed + layer) & 0xFFFFFFFF, nx, ny );
+					value += Math.Clamp( noiseValue, -1.0f, 1.0f ) * amplitude;
+				}
+
+				// Save the computed value to the heightmap
+				lock ( heightmap )
+				{
+					heightmap[x, y] += value;
+				}
+			}
+		} );
+
+		// Normalize the heightmap to the range [0, 1]
+		heightmap = NormalizeHeightmap( heightmap );
+
+		// Apply the shape function and amplify its contribution if needed
+		float shapeAmplification = 1.2f; // Adjust for stronger shape effects
+		Parallel.For( 0, height, y =>
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				heightmap[x, y] *= MathF.Pow( shapeFunction( x, y ), shapeAmplification );
+			}
+		} );
+
+		// Rescale the heightmap to the desired maxHeight
+		float currentMax = FindMaxHeight( heightmap );
+		if ( currentMax > 0 )
+		{
+			Parallel.For( 0, height, y =>
+			{
+				for ( int x = 0; x < width; x++ )
+				{
+					heightmap[x, y] = (heightmap[x, y] / currentMax) * maxHeight;
+				}
+			} );
+		}
+
+		// Apply smoothing
+		if ( smoothingPasses > 0 )
+		{
+			heightmap = SmoothHeightmap( heightmap, smoothingPasses );
+		}
+
+		return heightmap;
+	}
+
+
+	// Helper method to find the maximum height in a heightmap
+	private static float FindMaxHeight( float[,] heightmap )
+	{
+		float max = float.MinValue;
+		int width = heightmap.GetLength( 0 );
+		int height = heightmap.GetLength( 1 );
+
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				if ( heightmap[x, y] > max )
+				{
+					max = heightmap[x, y];
+				}
+			}
+		}
+
+		return max;
+	}
+
+
+	private static float[,] NormalizeHeightmap( float[,] heightmap )
 	{
 		int width = heightmap.GetLength( 0 );
 		int height = heightmap.GetLength( 1 );
 
-		// Create water and sediment layers
-		float[,] water = new float[width, height];
-		float[,] sediment = new float[width, height];
+		float min = float.MaxValue;
+		float max = float.MinValue;
 
-		// Perform erosion for a number of iterations
-		for ( int iter = 0; iter < iterations; iter++ )
+		// Find the min and max values
+		for ( int y = 0; y < height; y++ )
 		{
-			// Step 1: Add water (simulate rain)
-			for ( int y = 0; y < height; y++ )
+			for ( int x = 0; x < width; x++ )
 			{
-				for ( int x = 0; x < width; x++ )
-				{
-					water[x, y] += rainRate;
-				}
+				float value = heightmap[x, y];
+				if ( value < min ) min = value;
+				if ( value > max ) max = value;
 			}
+		}
 
-			// Step 2: Calculate water flow and sediment transport
-			float[,] newWater = new float[width, height];
-			float[,] deltaSediment = new float[width, height];
-
-			for ( int y = 1; y < height - 1; y++ )
+		// Normalize the values
+		float[,] normalized = new float[width, height];
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
 			{
-				for ( int x = 1; x < width - 1; x++ )
-				{
-					float totalFlow = 0.0f;
-					float[] flow = new float[4]; // Left, Right, Up, Down
-
-					// Calculate flow to each neighbor
-					for ( int i = 0; i < 4; i++ )
-					{
-						int nx = x + (i == 0 ? -1 : i == 1 ? 1 : 0);
-						int ny = y + (i == 2 ? -1 : i == 3 ? 1 : 0);
-
-						float heightDifference = (heightmap[x, y] + water[x, y]) - (heightmap[nx, ny] + water[nx, ny]);
-						if ( heightDifference > 0 )
-						{
-							flow[i] = heightDifference;
-							totalFlow += heightDifference;
-						}
-					}
-
-					// Normalize flow and update water
-					for ( int i = 0; i < 4; i++ )
-					{
-						int nx = x + (i == 0 ? -1 : i == 1 ? 1 : 0);
-						int ny = y + (i == 2 ? -1 : i == 3 ? 1 : 0);
-
-						if ( totalFlow > 0 )
-						{
-							float normalizedFlow = flow[i] / totalFlow;
-							float transfer = normalizedFlow * water[x, y];
-
-							newWater[nx, ny] += transfer;
-							newWater[x, y] -= transfer;
-
-							// Sediment transport
-							float sedimentTransfer = normalizedFlow * sediment[x, y];
-							deltaSediment[nx, ny] += sedimentTransfer;
-							deltaSediment[x, y] -= sedimentTransfer;
-						}
-					}
-				}
+				normalized[x, y] = (heightmap[x, y] - min) / (max - min);
 			}
+		}
 
-			// Step 3: Erode and deposit sediment
-			for ( int y = 1; y < height - 1; y++ )
+		return normalized;
+	}
+
+	public static float[,] AddTurbulenceForRivers(
+		float[,] heightmap,
+		long seed,
+		float riverFrequency, // Frequency for river placement
+		float riverWidth, // Width of the rivers
+		float riverDepth, // Depth of the rivers
+		float turbulenceFrequency, // Turbulence frequency
+		float turbulenceStrength, // Turbulence strength
+		float minRiverSpacing // Minimum spacing between rivers
+	)
+	{
+		int width = heightmap.GetLength( 0 );
+		int height = heightmap.GetLength( 1 );
+		float[,] newHeightmap = (float[,])heightmap.Clone();
+
+		Random random = new Random( (int)(seed & 0xFFFFFFFF) );
+		float[,] riverPlacementNoise = new float[width, height];
+
+		// Generate river placement noise
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
 			{
-				for ( int x = 1; x < width - 1; x++ )
-				{
-					float maxSediment = water[x, y] * sedimentCapacity;
-					if ( sediment[x, y] > maxSediment )
-					{
-						// Deposit excess sediment
-						heightmap[x, y] += sediment[x, y] - maxSediment;
-						sediment[x, y] = maxSediment;
-					}
-					else
-					{
-						// Erode terrain to match sediment capacity
-						float erosion = maxSediment - sediment[x, y];
-						heightmap[x, y] -= erosion;
-						sediment[x, y] += erosion;
-					}
-				}
+				float nx = x / (float)width;
+				float ny = y / (float)height;
+
+				// Noise for river placement
+				riverPlacementNoise[x, y] = OpenSimplex2S.Noise2( seed, nx * riverFrequency, ny * riverFrequency );
 			}
+		}
 
-			// Step 4: Evaporate water
-			for ( int y = 0; y < height; y++ )
+		// Process heightmap with river carving
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
 			{
-				for ( int x = 0; x < width; x++ )
+				float nx = x / (float)width;
+				float ny = y / (float)height;
+
+				float riverNoise = MathF.Abs( riverPlacementNoise[x, y] ); // Use absolute noise for placement
+
+				// Determine if the point is within the river carving zone
+				if ( riverNoise < riverWidth )
 				{
-					water[x, y] = Math.Max( 0, water[x, y] - evaporationRate );
+					// Calculate the smooth curve effect based on distance from the center
+					float distanceFactor = 1.0f - (riverNoise / riverWidth); // 1 at center, 0 at edge
+					float smoothDepthReduction = MathF.Pow( distanceFactor, 10f ) * riverDepth; // Smooth slope
+
+					// Add turbulence for a more organic flow
+					float turbulence = OpenSimplex2S.Noise2( seed + 1, nx * turbulenceFrequency, ny * turbulenceFrequency )
+									   * turbulenceStrength;
+
+					// Apply smooth depth reduction and turbulence
+					float reducedHeight = newHeightmap[x, y] - smoothDepthReduction /*+ turbulence*/;
+
+					// Clamp height to ensure it doesn't rise above the original
+					newHeightmap[x, y] = MathF.Max( 0, MathF.Min( newHeightmap[x, y], reducedHeight ) );
+				}
+
+				// Enforce minimum spacing between rivers
+				if ( riverNoise < minRiverSpacing )
+				{
+					// Slightly raise the terrain to enforce separation
+					newHeightmap[x, y] += (minRiverSpacing - riverNoise) * 0.05f;
 				}
 			}
 		}
 
-		return heightmap;
+		return newHeightmap;
 	}
 
 	// Smooths the heightmap using a simple box blur with adjustable strength
@@ -611,9 +1018,6 @@ public class TerrainGenerationTool : Widget
 		return smoothed;
 	}
 
-	// Hilly terrain generator
-	
-
 	public static ushort[] ConvertFloatArrayToUShortArray( float[,] input, float scale = 65535.0f )
 	{
 		// Get the dimensions of the 2D array
@@ -639,6 +1043,39 @@ public class TerrainGenerationTool : Widget
 		return output;
 	}
 
+	public static byte[] ConvertRawFloatArrayToByteArray( float[,] rawData, float scale = 65535.0f )
+	{
+		if ( rawData == null )
+		{
+			throw new ArgumentNullException( nameof( rawData ), "Input rawData cannot be null." );
+		}
+
+		int rows = rawData.GetLength( 0 );
+		int cols = rawData.GetLength( 1 );
+
+		// Create a byte array with 2 bytes per value
+		byte[] byteArray = new byte[rows * cols * 2]; // 2 bytes per ushort
+
+		int index = 0;
+		for ( int row = 0; row < rows; row++ )
+		{
+			for ( int col = 0; col < cols; col++ )
+			{
+				float value = rawData[row, col];
+				value = Math.Clamp( value, 0.0f, 1.0f ); // Ensure value is in the range [0, 1]
+
+				// Convert to 16-bit unsigned integer
+				ushort ushortValue = (ushort)(value * scale);
+
+				// Store in byte array (little-endian order)
+				byteArray[index++] = (byte)(ushortValue & 0xFF);       // Lower byte
+				byteArray[index++] = (byte)((ushortValue >> 8) & 0xFF); // Upper byte
+			}
+		}
+
+		return byteArray;
+	}
+
 	// Converts a heightmap to a grayscale image using SkiaSharp
 	public static SKBitmap HeightmapToImage( float[,] heightmap )
 	{
@@ -657,28 +1094,6 @@ public class TerrainGenerationTool : Widget
 		}
 		return bitmap;
 	}
-
-	/*public static SKBitmap HeightmapToImage( float[,] heightmap )
-	{
-		int width = heightmap.GetLength( 0 );
-		int height = heightmap.GetLength( 1 );
-		SKBitmap bitmap = new SKBitmap( width, height, SKColorType.Rgba8888, SKAlphaType.Premul );
-
-		for ( int y = 0; y < height; y++ )
-		{
-			for ( int x = 0; x < width; x++ )
-			{
-				float value = heightmap[x, y];
-				int luminance = (int)(value * 255);
-				luminance = Math.Clamp( luminance, 0, 255 );
-
-				// Set Alpha as fully opaque and Luminance for grayscale
-				bitmap.SetPixel( x, y, new SKColor( (byte)luminance, (byte)luminance, (byte)luminance, 255 ) );
-			}
-		}
-
-		return bitmap;
-	}*/
 
 	public byte[] ConvertSKBitmapToBytes( SKBitmap bitmap, SKEncodedImageFormat format, int quality = 100 )
 	{
@@ -724,9 +1139,8 @@ public class TerrainGenerationTool : Widget
 				binaryWriter.Write( value );
 			}
 		}
-		Console.WriteLine( $"Heightmap 16-bit RAW file saved to {filename}" );
 	}
-	public static float[,] GenerateSplatmap( float[,] heightmap, float[] thresholds, float maxHeight )
+	/*public static float[,] GenerateSplatmap( float[,] heightmap, float[] thresholds, float maxHeight )
 	{
 		int width = heightmap.GetLength( 0 );
 		int height = heightmap.GetLength( 1 );
@@ -752,7 +1166,44 @@ public class TerrainGenerationTool : Widget
 		}
 
 		return splatmap;
+	}*/
+
+	public static float[,] GenerateSplatmap( float[,] heightmap, float[] thresholds, float maxHeight )
+	{
+		int width = heightmap.GetLength( 0 );
+		int height = heightmap.GetLength( 1 );
+		float[,] splatmap = new float[width, height];
+
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				// Normalize height value relative to the maximum height
+				float normalizedHeight = heightmap[x, y] / maxHeight;
+
+				// Interpolate between thresholds for smoother transitions
+				for ( int i = 0; i < thresholds.Length - 1; i++ )
+				{
+					if ( normalizedHeight >= thresholds[i] && normalizedHeight <= thresholds[i + 1] )
+					{
+						// Linear interpolation between the two layers
+						float t = (normalizedHeight - thresholds[i]) / (thresholds[i + 1] - thresholds[i]);
+						splatmap[x, y] = i + t; // Interpolated layer index
+						break;
+					}
+				}
+
+				// Assign the last layer if above the highest threshold
+				if ( normalizedHeight > thresholds[thresholds.Length - 1] )
+				{
+					splatmap[x, y] = thresholds.Length - 1;
+				}
+			}
+		}
+
+		return splatmap;
 	}
+
 
 	public static SKBitmap SplatmapToImage( float[,] splatmap, SKColor[] colors )
 	{
@@ -788,8 +1239,6 @@ public class TerrainGenerationTool : Widget
 		// Write the encoded data to a file
 		using var stream = File.OpenWrite( filename );
 		data.SaveTo( stream );
-
-		Console.WriteLine( $"Splatmap PNG file saved to {filename}" );
 	}
 
 	public static void SaveSplatmapRaw( float[,] splatmap, string filename )
@@ -806,7 +1255,5 @@ public class TerrainGenerationTool : Widget
 				binaryWriter.Write( splatmap[x, y] );
 			}
 		}
-
-		Console.WriteLine( $"Splatmap RAW file saved to {filename}" );
 	}
 }

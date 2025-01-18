@@ -1,6 +1,6 @@
 using System;
 
-public sealed class SpinComponent : Component//, Component.ExecuteInEditor
+public sealed class SpinComponent : Component, Component.ExecuteInEditor
 {
 	[Property] public Angles SpinAngles { get; set; }
 

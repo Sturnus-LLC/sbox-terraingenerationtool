@@ -357,6 +357,7 @@
         {
           "__type": "SpinComponent",
           "__guid": "2e91a25a-b7cb-40eb-9f73-53e72db7d3d9",
+          "__enabled": false,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,
           "OnComponentEnabled": null,
