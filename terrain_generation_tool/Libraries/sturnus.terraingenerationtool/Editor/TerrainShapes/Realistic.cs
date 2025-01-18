@@ -28,7 +28,6 @@ public static class RealisticShapes
 			ny += warpY;
 		}
 
-		// Generate multi-octave Perlin noise for base terrain
 		float baseTerrain = OpenSimplex2S.Noise2( seed, nx, ny );
 
 		// Create hill/valley transitions with non-linear blending

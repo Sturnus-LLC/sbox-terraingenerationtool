@@ -340,7 +340,7 @@
           "Components": [
             {
               "__type": "Sandbox.Terrain",
-              "__guid": "23504372-1faf-4a0c-bd0a-1541814c450e",
+              "__guid": "9286b8a2-37ad-4eaf-8142-b2f758656e06",
               "__version": 1,
               "ClipMapLodExtentTexels": 256,
               "ClipMapLodLevels": 6,
@@ -360,11 +360,11 @@
               "OnTriggerExit": null,
               "RenderType": "Off",
               "Static": true,
-              "Storage": "terrain_1024.terrain",
+              "Storage": "terrain_512.terrain",
               "Surface": null,
               "SurfaceVelocity": "0,0,0",
-              "TerrainHeight": 10000,
-              "TerrainSize": 20000
+              "TerrainHeight": 1000,
+              "TerrainSize": 2000
             }
           ]
         }
@@ -374,8 +374,7 @@
       "__guid": "19de550a-583e-41ad-a97e-e672a3649fd5",
       "Flags": 0,
       "Name": "Player Controller",
-      "Position": "4934.396,12448.91,3928.112",
-      "Enabled": true,
+      "Position": "100,100,172.2002",
       "Components": [
         {
           "__type": "Sandbox.PlayerController",
@@ -612,9 +611,8 @@
       "__guid": "812f321d-9482-47b3-b6d6-c8ee1cee82aa",
       "Flags": 0,
       "Name": "Water",
-      "Position": "0,0,-810.6844",
-      "Scale": "100,100,33.40003",
-      "Enabled": true,
+      "Position": "0,4725.024,-690.644",
+      "Scale": "100,344.6999,33.40003",
       "Components": [
         {
           "__type": "Sandbox.ModelRenderer",
@@ -622,7 +620,7 @@
           "BodyGroups": 18446744073709551615,
           "CreateAttachments": false,
           "MaterialGroup": null,
-          "MaterialOverride": "materials/water/water_temp.vmat",
+          "MaterialOverride": "materials/water/dev_water_00.vmat",
           "Model": null,
           "OnComponentDestroy": null,
           "OnComponentDisabled": null,

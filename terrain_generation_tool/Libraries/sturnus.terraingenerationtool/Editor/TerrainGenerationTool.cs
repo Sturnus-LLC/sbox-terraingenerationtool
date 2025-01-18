@@ -82,7 +82,7 @@ public class TerrainGenerationTool : Widget
 	[Group( "River & Stream Carving" )] bool RiverCarvingBool { get; set; } = true;
 	[Group( "River & Stream Carving" )][Range( 0.5f, 10f, 0.1f, true, true )] float RiverCarvingFrequency { get; set; } = 2f;
 	[Group( "River & Stream Carving" )][Range( 0.01f, 5f, 0.01f, true, true )] float RiverCarvingStrength { get; set; } = 0.5f;
-	[Group( "River & Stream Carving" )][Range( 0.01f, 1f, 0.01f, true, true )] float RiverCarvingDepth { get; set; } = 0.03f;
+	[Group( "River & Stream Carving" )][Range( 0.01f, 0.25f, 0.001f, true, true )] float RiverCarvingDepth { get; set; } = 0.01f;
 	[Group( "River & Stream Carving" )][Range( 0.001f, 2f, 0.01f, true, true )] float RiverCarvingWidth { get; set; } = 0.025f;
 	[Group( "River & Stream Carving" )][Range( 0.05f, 1f, 0.01f, true, true )] float RiverCarvingSpacing { get; set; } = 0.15f;
 	[Group( "River & Stream Carving" )][Range( 0.01f, 1f, 0.01f, true, true )] float RiverCarvingTurbulenceStrength { get; set; } = 0.08f;
@@ -91,8 +91,7 @@ public class TerrainGenerationTool : Widget
 	Gradient SplatMapGradient = new Gradient( new Gradient.ColorFrame( 0.0f, Color.Cyan ), new Gradient.ColorFrame( 0.25f, Color.Red ), new Gradient.ColorFrame( 0.5f, Color.Yellow ), new Gradient.ColorFrame( 0.75f, Color.Green ) );
 	SKColor[] _splatcolors { get; set; }
 
-
-	float[] _splatthresholds = { 0f, 0.01f, 0.02f, 0.03f, 0.04f, 0.05f };
+	float[] _splatthresholds = { 0f, 0.25f, 0.50f, 0.75f };
 	float[,] _heightmap;
 	float[,] _splatmap;
 	//byte[] _heightmap_image;
@@ -115,13 +114,22 @@ public class TerrainGenerationTool : Widget
 
 		SplatMapGradient.Blending = Gradient.BlendMode.Stepped;
 		MinimumSize = 500;
+		var scroll = new ScrollArea( null );
+		scroll.Canvas = new Widget( scroll );
+		scroll.Canvas.Layout = Layout.Column();
+		scroll.Canvas.Layout.Margin = 10;
 		Layout = Layout.Column();
+		Layout.Add( scroll );
 		
-		Layout.Margin = 10;
+		Layout.Margin = 0;
 		Layout.Spacing = 5;
 
-		var ShapeLabel = Layout.Add( new Label( "Terrain Shape" ) );
-		var ShapeArray = Layout.Add( new SegmentedControl( ) );
+		
+
+		var body = scroll.Canvas.Layout;
+
+		var ShapeLabel = body.Add( new Label( "Terrain Shape" ) );
+		var ShapeArray = body.Add( new SegmentedControl( ) );
 		for ( int i = 0; i < TerrainShapeArray.GetLength( 0 ); i++ )
 		{
 			// Initialize an empty list to store the values of the current row
@@ -142,36 +150,36 @@ public class TerrainGenerationTool : Widget
 			Enum.TryParse<TerrainShapeEnum>( ShapeArray.Selected, out TerrainShapeEnum terrain_out );
 			TerrainShapeEnumSelect = terrain_out;
 		};
-		var DimensionsLabel = Layout.Add( new Label( "Terrain Dimensions" ) );
-		var DimensionsEnum = Layout.Add( new EnumControlWidget( this.GetSerialized().GetProperty( nameof( TerrainDimensionsEnum ) ) ) );
-		Layout.AddSpacingCell( 5 );
-		var MaxHeightLabel = Layout.Add( new Label( "Max Height (relative)" ) );
-		var MaxHeightFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainMaxHeight ) ) ) );
-		Layout.AddSpacingCell( 5 );
-		var TerrainPlaneScaleLabel = Layout.Add( new Label( "Terrain Plane Scale" ) );
-		var TerrainPlaneScaleNumber = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainPlaneScale ) ) ) );
-		Layout.AddSpacingCell( 5 );
-		var TerrainSeedLabel = Layout.Add( new Label( "Terrain Seed" ) );
-		var TerrainSeedNumber = Layout.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( TerrainSeed ) ) ) );
-		Layout.AddSpacingCell( 5 );
-		var SmoothingPassesLabel = Layout.Add( new Label( "Smoothing Passes" ) );
-		var SmoothingPassesNumber = Layout.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( SmoothingPasses ) ) ) );
-		Layout.AddSpacingCell( 5 );
-		var NoiseLayerStacksLabel = Layout.Add( new Label( "Noise Layer Stacks" ) );
-		var NoiseLayerStacksNumber = Layout.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( NoiseLayerStacks ) ) ) );
-		Layout.AddSpacingCell( 5 );
-		var SplatMapColorsLabel = Layout.Add( new Label( "Splatmap Colors/Threshold" ) );
-		var SplatMapColorsNumber = Layout.Add( new GradientControlWidget( this.GetSerialized().GetProperty( nameof( SplatMapGradient ) ) ) );
-		Layout.AddSpacingCell( 5 );
-		var DomainWarpingLabel = Layout.Add( new Label( "Domain Warping" ) );
-		var DomainWarpingBool = Layout.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarping ) ) ) );
-		Layout.AddSpacingCell( 5 );
+		var DimensionsLabel = body.Add( new Label( "Terrain Dimensions" ) );
+		var DimensionsEnum = body.Add( new EnumControlWidget( this.GetSerialized().GetProperty( nameof( TerrainDimensionsEnum ) ) ) );
+		body.AddSpacingCell( 5 );
+		var MaxHeightLabel = body.Add( new Label( "Max Height (relative)" ) );
+		var MaxHeightFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainMaxHeight ) ) ) );
+		body.AddSpacingCell( 5 );
+		var TerrainPlaneScaleLabel = body.Add( new Label( "Terrain Plane Scale" ) );
+		var TerrainPlaneScaleNumber = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainPlaneScale ) ) ) );
+		body.AddSpacingCell( 5 );
+		var TerrainSeedLabel = body.Add( new Label( "Terrain Seed" ) );
+		var TerrainSeedNumber = body.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( TerrainSeed ) ) ) );
+		body.AddSpacingCell( 5 );
+		var SmoothingPassesLabel = body.Add( new Label( "Smoothing Passes" ) );
+		var SmoothingPassesNumber = body.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( SmoothingPasses ) ) ) );
+		body.AddSpacingCell( 5 );
+		var NoiseLayerStacksLabel = body.Add( new Label( "Noise Layer Stacks" ) );
+		var NoiseLayerStacksNumber = body.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( NoiseLayerStacks ) ) ) );
+		body.AddSpacingCell( 5 );
+		var SplatMapColorsLabel = body.Add( new Label( "Splatmap Colors/Threshold" ) );
+		var SplatMapColorsNumber = body.Add( new GradientControlWidget( this.GetSerialized().GetProperty( nameof( SplatMapGradient ) ) ) );
+		body.AddSpacingCell( 5 );
+		var DomainWarpingLabel = body.Add( new Label( "Domain Warping" ) );
+		var DomainWarpingBool = body.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarping ) ) ) );
+		body.AddSpacingCell( 5 );
 		if ( DomainWarping )
 		{
-			var DomainWarpingSizeLabel = Layout.Add( new Label( "Domain Warping (Size)" ) );
-			var DomainWarpingSizeFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingSize ) ) ) );
-			var DomainWarpingStrengthLabel = Layout.Add( new Label( "Domain Warping (Strength)" ) );
-			var DomainWarpingStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingStrength ) ) ) );
+			var DomainWarpingSizeLabel = body.Add( new Label( "Domain Warping (Size)" ) );
+			var DomainWarpingSizeFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingSize ) ) ) );
+			var DomainWarpingStrengthLabel = body.Add( new Label( "Domain Warping (Strength)" ) );
+			var DomainWarpingStrengthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingStrength ) ) ) );
 			DomainWarpingBool.MouseClick += () =>
 			{
 				if ( DomainWarping )
@@ -200,44 +208,34 @@ public class TerrainGenerationTool : Widget
 				}
 			};
 		}
-		Layout.AddSpacingCell( 5 );
-		var ErosionSimulationLabel = Layout.Add( new Label( "Erosion Simulation" ) );
-		var ErosionSimulationBool = Layout.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( ErosionSimulation ) ) ) );
+		/*body.AddSpacingCell( 5 );
+		var ErosionSimulationLabel = body.Add( new Label( "Erosion Simulation" ) );
+		var ErosionSimulationBool = body.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( ErosionSimulation ) ) ) );
 		if ( ErosionSimulation )
 		{
-		}
+		}*/
 
-		Layout.AddSpacingCell( 5 );
-		var RiverCarvingLabel = Layout.Add( new Label( "River Carving" ) );
-		var RiverCarvingBoolControl = Layout.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingBool ) ) ) );
+		body.AddSpacingCell( 5 );
+		var RiverCarvingLabel = body.Add( new Label( "River Carving" ) );
+		var RiverCarvingBoolControl = body.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingBool ) ) ) );
 
 		if ( RiverCarvingBool )
 		{
-			//var LayoutRow1 = Layout.AddRow( 1 );
-			/*var RiverCarvingFrequencyLabel = Layout.Add( new Label( "River Frequency" ) );
-			var RiverCarvingFrequencyFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingFrequency ) ) ) );
-			var RiverCarvingDepthLabel = Layout.Add( new Label( "River Depth (Relative)" ) );
-			var RiverCarvingDepthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingDepth ) ) ) );
-			var RiverCarvingWidthLabel = Layout.Add( new Label( "River Width (Relative)" ) );
-			var RiverCarvingWidthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingWidth ) ) ) );
-			var RiverCarvingTurbulenceStrengthLabel = Layout.Add( new Label( "Turbulence Strength" ) );
-			var RiverCarvingTurbulenceStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingTurbulenceStrength ) ) ) );
-			*/
 
-			var RiverCarvingFrequency = Layout.Add( new Label( "RiverCarvingFrequency" ));
-			var RiverCarvingFrequencyFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingFrequency ) ) ) );
-			var RiverCarvingStrength = Layout.Add( new Label("RiverCarvingStrength"));
-			var RiverCarvingStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingStrength))));
-			var RiverCarvingDepth = Layout.Add( new Label("RiverCarvingDepth"));
-			var RiverCarvingDepthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingDepth))));
-			var RiverCarvingWidth = Layout.Add( new Label("RiverCarvingWidth"));
-			var RiverCarvingWidthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingWidth))));
-			var RiverCarvingSpacing = Layout.Add( new Label("RiverCarvingSpacing"));
-			var RiverCarvingSpacingFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingSpacing))));
-			var RiverCarvingTurbulenceStrength = Layout.Add( new Label("RiverCarvingTurbulenceStrength"));
-			var RiverCarvingTurbulenceStrengthFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceStrength))));
-			var RiverCarvingTurbulenceFrequency = Layout.Add( new Label("RiverCarvingTurbulenceFrequency"));
-			var RiverCarvingTurbulenceFrequencyFloat = Layout.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceFrequency))));
+			var RiverCarvingFrequency = body.Add( new Label( "RiverCarvingFrequency" ));
+			var RiverCarvingFrequencyFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingFrequency ) ) ) );
+			/*var RiverCarvingStrength = body.Add( new Label("RiverCarvingStrength"));
+			var RiverCarvingStrengthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingStrength))));*/
+			var RiverCarvingDepth = body.Add( new Label("RiverCarvingDepth"));
+			var RiverCarvingDepthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingDepth))));
+			var RiverCarvingWidth = body.Add( new Label("RiverCarvingWidth"));
+			var RiverCarvingWidthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingWidth))));
+			var RiverCarvingSpacing = body.Add( new Label("RiverCarvingSpacing"));
+			var RiverCarvingSpacingFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingSpacing))));
+			var RiverCarvingTurbulenceStrength = body.Add( new Label("RiverCarvingTurbulenceStrength"));
+			var RiverCarvingTurbulenceStrengthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceStrength))));
+			var RiverCarvingTurbulenceFrequency = body.Add( new Label("RiverCarvingTurbulenceFrequency"));
+			var RiverCarvingTurbulenceFrequencyFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceFrequency))));
 
 
 
@@ -248,8 +246,8 @@ public class TerrainGenerationTool : Widget
 				{
 					RiverCarvingFrequency.Enabled = true;
 					RiverCarvingFrequencyFloat.Enabled = true;
-					RiverCarvingStrength.Enabled = true;
-					RiverCarvingStrengthFloat.Enabled = true;
+					/*RiverCarvingStrength.Enabled = true;
+					RiverCarvingStrengthFloat.Enabled = true;*/
 					RiverCarvingDepth.Enabled = true;
 					RiverCarvingDepthFloat.Enabled = true;
 					RiverCarvingWidth.Enabled = true;
@@ -262,8 +260,8 @@ public class TerrainGenerationTool : Widget
 					RiverCarvingTurbulenceFrequencyFloat.Enabled = true;
 					RiverCarvingFrequency.Visible = true;
 					RiverCarvingFrequencyFloat.Visible = true;
-					RiverCarvingStrength.Visible = true;
-					RiverCarvingStrengthFloat.Visible = true;
+					/*RiverCarvingStrength.Visible = true;
+					RiverCarvingStrengthFloat.Visible = true;*/
 					RiverCarvingDepth.Visible = true;
 					RiverCarvingDepthFloat.Visible = true;
 					RiverCarvingWidth.Visible = true;
@@ -279,8 +277,8 @@ public class TerrainGenerationTool : Widget
 				{
 					RiverCarvingFrequency.Enabled = false;
 					RiverCarvingFrequencyFloat.Enabled = false;
-					RiverCarvingStrength.Enabled = false;
-					RiverCarvingStrengthFloat.Enabled = false;
+					/*RiverCarvingStrength.Enabled = false;
+					RiverCarvingStrengthFloat.Enabled = false;*/
 					RiverCarvingDepth.Enabled = false;
 					RiverCarvingDepthFloat.Enabled = false;
 					RiverCarvingWidth.Enabled = false;
@@ -294,8 +292,8 @@ public class TerrainGenerationTool : Widget
 
 					RiverCarvingFrequency.Visible = false;
 					RiverCarvingFrequencyFloat.Visible = false;
-					RiverCarvingStrength.Visible = false;
-					RiverCarvingStrengthFloat.Visible = false;
+					/*RiverCarvingStrength.Visible = false;
+					RiverCarvingStrengthFloat.Visible = false;*/
 					RiverCarvingDepth.Visible = false;
 					RiverCarvingDepthFloat.Visible = false;
 					RiverCarvingWidth.Visible = false;
@@ -356,6 +354,13 @@ public class TerrainGenerationTool : Widget
 
 		var ApplyButton = Layout.Add( new Button( "Apply To Terrain", "file_upload", this ) );
 		ApplyButton.Tint = "#AF2020";
+
+		if ( _heightmap == null )
+		{
+			ExportButton.Enabled = false;
+			ApplyButton.Enabled = false;
+
+		}
 
 		GenerateButton.Clicked += () =>
 		{
@@ -518,7 +523,10 @@ public class TerrainGenerationTool : Widget
 				riverDepth: RiverCarvingDepth, // Depth of rivers
 				turbulenceFrequency: RiverCarvingTurbulenceFrequency, // Turbulence frequency
 				turbulenceStrength: RiverCarvingTurbulenceStrength, // Turbulence strength
-				minRiverSpacing: RiverCarvingSpacing // Minimum spacing between rivers
+				minRiverSpacing: RiverCarvingSpacing, // Minimum spacing between rivers
+				slopeSteepness:10f,
+				terrainNoiseFrequency: 2.0f, // Matches terrain noise frequency
+				terrainNoiseAmplitude: 0.5f // Matches terrain noise amplitude
 			);
 			}
 
@@ -543,7 +551,8 @@ public class TerrainGenerationTool : Widget
 			_preview_splatmap_texture = Texture.Load( Editor.FileSystem.Mounted, preview_splatmap_path );
 			PreviewSplatmap.Texture = _preview_splatmap_texture;
 
-			
+			ExportButton.Enabled = true;
+			ApplyButton.Enabled = true;
 
 		};
 
@@ -556,9 +565,6 @@ public class TerrainGenerationTool : Widget
 
 		ApplyButton.Clicked += () =>
 		{
-
-
-			//FirstTerrain.ControlMap.Update( ConvertRawFloatArrayToByteArray( _splatmap), 0, 0, (int)TerrainDimensionsEnum, (int)TerrainDimensionsEnum);
 			IDictionary<string, Action> WarnDiaglog = new Dictionary<string, Action>(); ;
 			WarnDiaglog.Add( "Apply", UpdateTerrain );
 			var PopUpWarn = new PopupWindow( "Warning: Terrain Override", "This will override your current scene's terrain data.","Cancel", WarnDiaglog );
@@ -567,7 +573,6 @@ public class TerrainGenerationTool : Widget
 		
 		Layout.AddStretchCell();
 		Show();
-
 	}
 
 	private void UpdateTerrain()
@@ -576,7 +581,8 @@ public class TerrainGenerationTool : Widget
 		var FirstTerrain = ActiveScene.GetAllComponents<Terrain>().FirstOrDefault();
 		FirstTerrain.SyncGPUTexture();
 		FirstTerrain.HeightMap.Update( ConvertRawFloatArrayToByteArray( _heightmap ), 0, 0, (int)TerrainDimensionsEnum, (int)TerrainDimensionsEnum );
-		
+		//FirstTerrain.ControlMap.Update( ConvertRawFloatArrayToByteArray( _splatmap), 0, 0, (int)TerrainDimensionsEnum, (int)TerrainDimensionsEnum);
+
 		FirstTerrain.Storage.HeightMap = ConvertFloatArrayToUShortArray( _heightmap );
 		FirstTerrain.UpdateMaterialsBuffer();
 	}
@@ -648,10 +654,10 @@ public class TerrainGenerationTool : Widget
 		string previewfile = Path.Combine( path, $"TerrainGenerationUtility_preview.png" );
 		string splatfile = Path.Combine( path, $"TerrainGenerationUtility_splat_preview.png" );
 
-		SKBitmap image = HeightmapToImage( _heightmap );
+		SKBitmap image = HeightmapToBitMap( _heightmap );
 		SaveImage( image, previewfile );
 		//float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
-		SKBitmap splat = SplatmapToImage( _splatmap, _splatcolors );
+		SKBitmap splat = SplatmapToBitMap( _splatmap, _splatcolors );
 		SaveSplatmapAsPng( splat, splatfile );
 	}
 
@@ -686,12 +692,12 @@ public class TerrainGenerationTool : Widget
 		SaveRaw( _heightmap, rawfile );
 		Log.Info( $"Raw file generated! - {rawfile}" );
 		//Generate & Export Preview image for widget
-		SKBitmap image = HeightmapToImage( _heightmap );
+		SKBitmap image = HeightmapToBitMap( _heightmap );
 		SaveImage( image, previewfile );
 		Log.Info( $"HeightMap preview file generated! - {previewfile}" );
 		//Generate & Export SplatMap image
 		float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
-		SKBitmap splat = SplatmapToImage( splatmap, _splatcolors );
+		SKBitmap splat = SplatmapToBitMap( splatmap, _splatcolors );
 		SaveSplatmapAsPng( splat, splatfile );
 		Log.Info( $"Splatmap file generated! - {splatfile}" );
 
@@ -907,7 +913,10 @@ public class TerrainGenerationTool : Widget
 		float riverDepth, // Depth of the rivers
 		float turbulenceFrequency, // Turbulence frequency
 		float turbulenceStrength, // Turbulence strength
-		float minRiverSpacing // Minimum spacing between rivers
+		float minRiverSpacing, // Minimum spacing between rivers
+		float slopeSteepness, // Controls the gradual slope of the riverbanks
+		float terrainNoiseFrequency, // Matches terrain surface noise frequency
+		float terrainNoiseAmplitude // Matches terrain surface noise amplitude
 	)
 	{
 		int width = heightmap.GetLength( 0 );
@@ -945,14 +954,14 @@ public class TerrainGenerationTool : Widget
 				{
 					// Calculate the smooth curve effect based on distance from the center
 					float distanceFactor = 1.0f - (riverNoise / riverWidth); // 1 at center, 0 at edge
-					float smoothDepthReduction = MathF.Pow( distanceFactor, 10f ) * riverDepth; // Smooth slope
+					float smoothDepthReduction = MathF.Pow( distanceFactor, slopeSteepness ) * riverDepth;
 
 					// Add turbulence for a more organic flow
 					float turbulence = OpenSimplex2S.Noise2( seed + 1, nx * turbulenceFrequency, ny * turbulenceFrequency )
 									   * turbulenceStrength;
 
 					// Apply smooth depth reduction and turbulence
-					float reducedHeight = newHeightmap[x, y] - smoothDepthReduction /*+ turbulence*/;
+					float reducedHeight = newHeightmap[x, y] - smoothDepthReduction + turbulence;
 
 					// Clamp height to ensure it doesn't rise above the original
 					newHeightmap[x, y] = MathF.Max( 0, MathF.Min( newHeightmap[x, y], reducedHeight ) );
@@ -964,6 +973,23 @@ public class TerrainGenerationTool : Widget
 					// Slightly raise the terrain to enforce separation
 					newHeightmap[x, y] += (minRiverSpacing - riverNoise) * 0.05f;
 				}
+			}
+		}
+
+		// Add base noise to the entire heightmap after carving
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				float nx = x / (float)width;
+				float ny = y / (float)height;
+
+				// Generate base noise
+				float baseNoise = OpenSimplex2S.Noise2( seed + 2, nx * 6f, ny * 6f )
+								  * 0.02f;
+
+				// Add noise to the heightmap
+				newHeightmap[x, y] = MathF.Max( 0, newHeightmap[x, y] + baseNoise );
 			}
 		}
 
@@ -1077,7 +1103,7 @@ public class TerrainGenerationTool : Widget
 	}
 
 	// Converts a heightmap to a grayscale image using SkiaSharp
-	public static SKBitmap HeightmapToImage( float[,] heightmap )
+	public static SKBitmap HeightmapToBitMap( float[,] heightmap )
 	{
 		int width = heightmap.GetLength( 0 );
 		int height = heightmap.GetLength( 1 );
@@ -1140,33 +1166,6 @@ public class TerrainGenerationTool : Widget
 			}
 		}
 	}
-	/*public static float[,] GenerateSplatmap( float[,] heightmap, float[] thresholds, float maxHeight )
-	{
-		int width = heightmap.GetLength( 0 );
-		int height = heightmap.GetLength( 1 );
-		float[,] splatmap = new float[width, height];
-
-		for ( int y = 0; y < height; y++ )
-		{
-			for ( int x = 0; x < width; x++ )
-			{
-				// Normalize height value relative to the maximum height
-				float normalizedHeight = heightmap[x, y] / maxHeight;
-
-				// Determine splat layer based on thresholds
-				for ( int i = 0; i < thresholds.Length; i++ )
-				{
-					if ( normalizedHeight <= thresholds[i] )
-					{
-						splatmap[x, y] = i;
-						break;
-					}
-				}
-			}
-		}
-
-		return splatmap;
-	}*/
 
 	public static float[,] GenerateSplatmap( float[,] heightmap, float[] thresholds, float maxHeight )
 	{
@@ -1205,7 +1204,7 @@ public class TerrainGenerationTool : Widget
 	}
 
 
-	public static SKBitmap SplatmapToImage( float[,] splatmap, SKColor[] colors )
+	public static SKBitmap SplatmapToBitMap( float[,] splatmap, SKColor[] colors )
 	{
 		int width = splatmap.GetLength( 0 );
 		int height = splatmap.GetLength( 1 );
@@ -1239,21 +1238,5 @@ public class TerrainGenerationTool : Widget
 		// Write the encoded data to a file
 		using var stream = File.OpenWrite( filename );
 		data.SaveTo( stream );
-	}
-
-	public static void SaveSplatmapRaw( float[,] splatmap, string filename )
-	{
-		int width = splatmap.GetLength( 0 );
-		int height = splatmap.GetLength( 1 );
-		using var fileStream = new FileStream( filename, FileMode.Create, FileAccess.Write );
-		using var binaryWriter = new BinaryWriter( fileStream );
-
-		for ( int y = 0; y < height; y++ )
-		{
-			for ( int x = 0; x < width; x++ )
-			{
-				binaryWriter.Write( splatmap[x, y] );
-			}
-		}
 	}
 }
