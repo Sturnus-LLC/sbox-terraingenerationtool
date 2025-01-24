@@ -410,7 +410,8 @@
               "Flags": 0,
               "Name": "Island",
               "Position": "1000,1000,750",
-              "Rotation": "-0.1464466,0.3535534,0.3535534,0.8535534",
+              "Rotation": "0.00000002920396,0.3826835,-0.00000001209668,0.9238795",
+              "Enabled": true,
               "Components": [
                 {
                   "__type": "Sandbox.TextRenderer",
@@ -564,7 +565,8 @@
               "Flags": 0,
               "Name": "Mountainous",
               "Position": "1000,1000,750",
-              "Rotation": "-0.1464466,0.3535534,0.3535534,0.8535534",
+              "Rotation": "0.00000002920396,0.3826835,-0.00000001209668,0.9238795",
+              "Enabled": true,
               "Components": [
                 {
                   "__type": "Sandbox.TextRenderer",
@@ -749,7 +751,8 @@
               "Flags": 0,
               "Name": "Volcanic",
               "Position": "1000,1000,750",
-              "Rotation": "-0.1464466,0.3535534,0.3535534,0.8535534",
+              "Rotation": "0.00000002920396,0.3826835,-0.00000001209668,0.9238795",
+              "Enabled": true,
               "Components": [
                 {
                   "__type": "Sandbox.TextRenderer",
@@ -892,7 +895,8 @@
               "Flags": 0,
               "Name": "Normal",
               "Position": "1000,1000,750",
-              "Rotation": "-0.1464466,0.3535534,0.3535534,0.8535534",
+              "Rotation": "0.00000002920396,0.3826835,-0.00000001209668,0.9238795",
+              "Enabled": true,
               "Components": [
                 {
                   "__type": "Sandbox.TextRenderer",
@@ -915,6 +919,294 @@
                   "TextAlignment": "Center",
                   "TextScope": {
                     "Text": "Normal",
+                    "TextColor": "1,1,1,1",
+                    "FontName": "Poppins",
+                    "FontSize": 128,
+                    "FontWeight": 800,
+                    "FontItalic": false,
+                    "LineHeight": 1,
+                    "LetterSpacing": 0,
+                    "WordSpacing": 0,
+                    "Outline": {
+                      "Enabled": true,
+                      "Size": 4,
+                      "Color": "0,0,0,1"
+                    },
+                    "Shadow": {
+                      "Enabled": true,
+                      "Size": 4,
+                      "Color": "0,0,0,1",
+                      "Offset": "4,4"
+                    },
+                    "OutlineUnder": {
+                      "Enabled": false,
+                      "Size": 4,
+                      "Color": "0,1,0,1"
+                    },
+                    "ShadowUnder": {
+                      "Enabled": false,
+                      "Size": 4,
+                      "Color": "0,0,0,1",
+                      "Offset": "4,4"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "__guid": "8cfcb36a-c757-42a1-8ab2-e87154176a36",
+          "Flags": 0,
+          "Name": "Realistic",
+          "Position": "122.0701,-4243.926,0",
+          "Enabled": true,
+          "Components": [
+            {
+              "__type": "Sandbox.Terrain",
+              "__guid": "0e8a13b3-2ac6-4fb8-b4a6-f45b25ec8d7b",
+              "__version": 1,
+              "ClipMapLodExtentTexels": 256,
+              "ClipMapLodLevels": 6,
+              "EnableCollision": true,
+              "Friction": null,
+              "IsTrigger": false,
+              "MaterialOverride": null,
+              "OnComponentDestroy": null,
+              "OnComponentDisabled": null,
+              "OnComponentEnabled": null,
+              "OnComponentFixedUpdate": null,
+              "OnComponentStart": null,
+              "OnComponentUpdate": null,
+              "OnObjectTriggerEnter": null,
+              "OnObjectTriggerExit": null,
+              "OnTriggerEnter": null,
+              "OnTriggerExit": null,
+              "RenderType": "Off",
+              "Static": true,
+              "Storage": "untitled_volcanic.terrain",
+              "Surface": null,
+              "SurfaceVelocity": "0,0,0",
+              "TerrainHeight": 1000,
+              "TerrainSize": 2000
+            }
+          ],
+          "Children": [
+            {
+              "__guid": "6f4f0615-6075-4449-a22a-1da7bbee235f",
+              "Flags": 0,
+              "Name": "World",
+              "Position": "1000,1000,750",
+              "Enabled": true,
+              "Components": [
+                {
+                  "__type": "Sandbox.WorldPanel",
+                  "__guid": "ca647a0d-37bc-48c8-9a90-716c7fb806b1",
+                  "HorizontalAlign": "Center",
+                  "InteractionRange": 1000,
+                  "LookAtCamera": true,
+                  "OnComponentDestroy": null,
+                  "OnComponentDisabled": null,
+                  "OnComponentEnabled": null,
+                  "OnComponentFixedUpdate": null,
+                  "OnComponentStart": null,
+                  "OnComponentUpdate": null,
+                  "PanelSize": "30000,5000",
+                  "RenderOptions": {
+                    "GameLayer": true,
+                    "OverlayLayer": false,
+                    "BloomLayer": false,
+                    "AfterUILayer": false
+                  },
+                  "RenderScale": 75,
+                  "VerticalAlign": "Center"
+                },
+                {
+                  "__type": "Sandbox.TerrainTitle",
+                  "__guid": "b03f26b6-9262-4721-b528-4195dde00195",
+                  "MyStringValue": "Hello World!",
+                  "OnComponentDestroy": null,
+                  "OnComponentDisabled": null,
+                  "OnComponentEnabled": null,
+                  "OnComponentFixedUpdate": null,
+                  "OnComponentStart": null,
+                  "OnComponentUpdate": null
+                }
+              ]
+            },
+            {
+              "__guid": "dc86f5bc-a95b-4158-a0c4-788f317a2ea2",
+              "Flags": 0,
+              "Name": "Realistic",
+              "Position": "1000,1000,750",
+              "Rotation": "0.00000002920396,0.3826835,-0.00000001209668,0.9238795",
+              "Enabled": true,
+              "Components": [
+                {
+                  "__type": "Sandbox.TextRenderer",
+                  "__guid": "fd922c0b-35b2-47d4-a9cf-087ff79f9474",
+                  "__version": 1,
+                  "BlendMode": "Normal",
+                  "OnComponentDestroy": null,
+                  "OnComponentDisabled": null,
+                  "OnComponentEnabled": null,
+                  "OnComponentFixedUpdate": null,
+                  "OnComponentStart": null,
+                  "OnComponentUpdate": null,
+                  "RenderOptions": {
+                    "GameLayer": true,
+                    "OverlayLayer": false,
+                    "BloomLayer": false,
+                    "AfterUILayer": false
+                  },
+                  "Scale": 2,
+                  "TextAlignment": "Center",
+                  "TextScope": {
+                    "Text": "Realistic",
+                    "TextColor": "1,1,1,1",
+                    "FontName": "Poppins",
+                    "FontSize": 128,
+                    "FontWeight": 800,
+                    "FontItalic": false,
+                    "LineHeight": 1,
+                    "LetterSpacing": 0,
+                    "WordSpacing": 0,
+                    "Outline": {
+                      "Enabled": true,
+                      "Size": 4,
+                      "Color": "0,0,0,1"
+                    },
+                    "Shadow": {
+                      "Enabled": true,
+                      "Size": 4,
+                      "Color": "0,0,0,1",
+                      "Offset": "4,4"
+                    },
+                    "OutlineUnder": {
+                      "Enabled": false,
+                      "Size": 4,
+                      "Color": "0,1,0,1"
+                    },
+                    "ShadowUnder": {
+                      "Enabled": false,
+                      "Size": 4,
+                      "Color": "0,0,0,1",
+                      "Offset": "4,4"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "__guid": "0bd3079e-a4c1-4c40-b577-3524146e1203",
+          "Flags": 0,
+          "Name": "Sea",
+          "Position": "-2099.609,-4243.926,0",
+          "Enabled": true,
+          "Components": [
+            {
+              "__type": "Sandbox.Terrain",
+              "__guid": "9342f8f4-2b07-4667-a21e-02620f3ea8f0",
+              "__version": 1,
+              "ClipMapLodExtentTexels": 256,
+              "ClipMapLodLevels": 6,
+              "EnableCollision": true,
+              "Friction": null,
+              "IsTrigger": false,
+              "MaterialOverride": null,
+              "OnComponentDestroy": null,
+              "OnComponentDisabled": null,
+              "OnComponentEnabled": null,
+              "OnComponentFixedUpdate": null,
+              "OnComponentStart": null,
+              "OnComponentUpdate": null,
+              "OnObjectTriggerEnter": null,
+              "OnObjectTriggerExit": null,
+              "OnTriggerEnter": null,
+              "OnTriggerExit": null,
+              "RenderType": "Off",
+              "Static": true,
+              "Storage": "untitled_volcanic.terrain",
+              "Surface": null,
+              "SurfaceVelocity": "0,0,0",
+              "TerrainHeight": 1000,
+              "TerrainSize": 2000
+            }
+          ],
+          "Children": [
+            {
+              "__guid": "6522fbcc-6fa0-498a-a4bb-e7a1de3b02cf",
+              "Flags": 0,
+              "Name": "World",
+              "Position": "1000,1000,750",
+              "Enabled": true,
+              "Components": [
+                {
+                  "__type": "Sandbox.WorldPanel",
+                  "__guid": "99fb8696-a534-47b0-a006-abdf83ca187f",
+                  "HorizontalAlign": "Center",
+                  "InteractionRange": 1000,
+                  "LookAtCamera": true,
+                  "OnComponentDestroy": null,
+                  "OnComponentDisabled": null,
+                  "OnComponentEnabled": null,
+                  "OnComponentFixedUpdate": null,
+                  "OnComponentStart": null,
+                  "OnComponentUpdate": null,
+                  "PanelSize": "30000,5000",
+                  "RenderOptions": {
+                    "GameLayer": true,
+                    "OverlayLayer": false,
+                    "BloomLayer": false,
+                    "AfterUILayer": false
+                  },
+                  "RenderScale": 75,
+                  "VerticalAlign": "Center"
+                },
+                {
+                  "__type": "Sandbox.TerrainTitle",
+                  "__guid": "07443b40-ee08-449a-a1df-ecbc23f5e734",
+                  "MyStringValue": "Hello World!",
+                  "OnComponentDestroy": null,
+                  "OnComponentDisabled": null,
+                  "OnComponentEnabled": null,
+                  "OnComponentFixedUpdate": null,
+                  "OnComponentStart": null,
+                  "OnComponentUpdate": null
+                }
+              ]
+            },
+            {
+              "__guid": "79d516a0-acde-4363-8374-c54b4a5925be",
+              "Flags": 0,
+              "Name": "Sea",
+              "Position": "1000,1000,750",
+              "Rotation": "0.00000002920396,0.3826835,-0.00000001209668,0.9238795",
+              "Enabled": true,
+              "Components": [
+                {
+                  "__type": "Sandbox.TextRenderer",
+                  "__guid": "01d24cc6-2587-4694-b605-257c54d4ce22",
+                  "__version": 1,
+                  "BlendMode": "Normal",
+                  "OnComponentDestroy": null,
+                  "OnComponentDisabled": null,
+                  "OnComponentEnabled": null,
+                  "OnComponentFixedUpdate": null,
+                  "OnComponentStart": null,
+                  "OnComponentUpdate": null,
+                  "RenderOptions": {
+                    "GameLayer": true,
+                    "OverlayLayer": false,
+                    "BloomLayer": false,
+                    "AfterUILayer": false
+                  },
+                  "Scale": 2,
+                  "TextAlignment": "Center",
+                  "TextScope": {
+                    "Text": "Sea",
                     "TextColor": "1,1,1,1",
                     "FontName": "Poppins",
                     "FontSize": 128,

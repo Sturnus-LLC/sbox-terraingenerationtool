@@ -2,10 +2,10 @@
 using Sandbox;
 using System;
 
-namespace Sturnus.TerrainGenerationTool.Mountainous;
-public static class MountainousShapes
+namespace Sturnus.TerrainGenerationTool;
+public static class Mountainous
 {
-	public static float DefaultMountain( int x, int y, int width, int height, long seed, bool warp, float warpSize = 0.1f, float warpStrength = 0.5f )
+	public static float Default( int x, int y, int width, int height, long seed, float minHeight, bool warp, float warpSize = 0.1f, float warpStrength = 0.5f )
 	{
 		float nx = x / (float)width; // Normalize x to range [0, 1]
 		float ny = y / (float)height; // Normalize y to range [0, 1]
@@ -47,7 +47,14 @@ public static class MountainousShapes
 		// Apply a falloff effect to keep the edges lower
 		float edgeFalloff = 1.0f - Math.Clamp( Math.Abs( nx - 0.5f ) + Math.Abs( ny - 0.5f ), 0, 1 );
 
+		// Combine all effects
+		float heightValue = combinedNoise * edgeFalloff;
+
+		// Add a baseline value to ensure no flat zero areas
+		float baseline = minHeight; // Minimum height
+		heightValue = MathF.Max( heightValue, baseline );
+
 		// Combine everything with edge falloff
-		return Math.Clamp( combinedNoise * edgeFalloff, 0, 1 );
+		return Math.Clamp( heightValue, 0, 1 );
 	}
 }
