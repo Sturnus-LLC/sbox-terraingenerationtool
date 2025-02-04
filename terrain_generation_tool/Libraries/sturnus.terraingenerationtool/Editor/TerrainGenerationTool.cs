@@ -77,7 +77,7 @@ public class TerrainGenerationTool : Widget
 	///
 	[Group( "Tool Placement" )] bool StagingArea { get; set; } = true;
 	[Group( "Tool Placement" )][Range( 1, 100, 1, true, true )] int StagingAreaSize { get; set; } = 10; // Size of the square (in grid units)
-	[Group( "Tool Placement" )][Range( 0, 1, 0.01f, true, true )] float StagingAreaHeight { get; set; } = 0.5f; // Height of the flat square
+	[Group( "Tool Placement" )][Range( 0, 1, 0.01f, true, true )] float StagingAreaHeight { get; set; } = 0.1f; // Height of the flat square
 	[Group( "Tool Placement" )][Range( 0, 1, 0.01f, true, true )] float StagingAreaX { get; set; } = 0.1f; // X-center of the square as a ratio
 	[Group( "Tool Placement" )][Range( 0, 1, 0.01f, true, true )] float StagingAreaY { get; set; } = 0.1f; // Y-center of the square as a ratio
 

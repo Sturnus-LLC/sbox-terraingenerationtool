@@ -1,0 +1,15 @@
+{
+  "AlbedoImage": "materials/terrain/sand/03/sand03_color.png",
+  "RoughnessImage": "materials/default/default_rough.tga",
+  "NormalImage": "materials/terrain/sand/03/sand03_normal.png",
+  "HeightImage": "materials/terrain/sand/03/sand03_height.png",
+  "AOImage": "materials/default/default_ao.tga",
+  "UVScale": 1,
+  "UVRotation": 0,
+  "Metalness": 0,
+  "NormalStrength": 1,
+  "HeightBlendStrength": 0.75,
+  "Surface": "surfaces/sand.surface",
+  "__references": [],
+  "__version": 0
+}

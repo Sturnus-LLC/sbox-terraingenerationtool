@@ -38,6 +38,13 @@
             "one",
             "two",
             "three",
+            "four",
+            "four",
+            "four",
+            "four",
+            "four",
+            "four",
+            "four",
             "four"
           ]
         },
@@ -366,7 +373,7 @@
           "OnObjectTriggerExit": null,
           "OnTriggerEnter": null,
           "OnTriggerExit": null,
-          "Scale": "30000,30000,30000",
+          "Scale": "5000,5000,5000",
           "Static": false,
           "Surface": null,
           "SurfaceVelocity": "0,0,0"
@@ -419,7 +426,7 @@
           "Components": [
             {
               "__type": "Sandbox.Terrain",
-              "__guid": "9e67a01d-11e5-4864-8c1a-a9266c209233",
+              "__guid": "7e39a1b1-9fbb-4723-adb8-44f60634c30a",
               "__version": 1,
               "ClipMapLodExtentTexels": 256,
               "ClipMapLodLevels": 6,
@@ -443,7 +450,7 @@
               "Surface": null,
               "SurfaceVelocity": "0,0,0",
               "TerrainHeight": 10000,
-              "TerrainSize": 20000
+              "TerrainSize": 19968
             }
           ]
         }
@@ -453,7 +460,7 @@
       "__guid": "19de550a-583e-41ad-a97e-e672a3649fd5",
       "Flags": 0,
       "Name": "Player Controller",
-      "Position": "10454.95,1286.605,347.405",
+      "Position": "-497.1855,-274.4165,315.1245",
       "Enabled": true,
       "Components": [
         {
@@ -761,6 +768,12 @@
             "one",
             "two",
             "three",
+            "four",
+            "four",
+            "four",
+            "four",
+            "four",
+            "four",
             "four"
           ]
         }
@@ -770,7 +783,7 @@
       "__guid": "b2a7b5f8-e50f-401f-9f26-71a0f00f3d88",
       "Flags": 0,
       "Name": "Object",
-      "Position": "10880.43,-150.9055,202.2574",
+      "Position": "-199.9023,-917.0746,266.1463",
       "Enabled": true,
       "Children": [
         {
@@ -872,7 +885,7 @@
       "Title": "test"
     },
     "NavMesh": {
-      "Enabled": false,
+      "Enabled": true,
       "IncludeStaticBodies": true,
       "IncludeKeyframedBodies": true,
       "EditorAutoUpdate": true,
