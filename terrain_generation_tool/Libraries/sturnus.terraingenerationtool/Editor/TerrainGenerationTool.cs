@@ -48,38 +48,38 @@ public class TerrainGenerationTool : Widget
 
 	TerrainDimensions TerrainDimensionsEnum { get; set; } = TerrainDimensions.x512;
 	//TerrainCategoryEnum TerrainShapeEnumSelect { get; set; }
-	[Range( 0.1f, 1f, 0.01f, true, true )] float TerrainMinHeight { get; set; } = 0.2f;
-	[Range( 0.1f, 1f, 0.01f, true, true )] float TerrainMaxHeight { get; set; } = 0.5f;
-	[Range( 0.1f, 1f, 0.01f, true, true )] float TerrainPlaneScale { get; set; } = 0.5f;
+	[Step( 0.01f ),MinMax(0.1f,1f)] float TerrainMinHeight { get; set; } = 0.2f;
+	[Step( 0.01f),MinMax(0.1f,1f)] float TerrainMaxHeight { get; set; } = 0.5f;
+	[Step( 0.01f),MinMax(0.1f,1f)] float TerrainPlaneScale { get; set; } = 0.5f;
 	long TerrainSeed { get; set; } = 1234567890;
-	[Range( 0, 20, 1, true, true )] int SmoothingPasses { get; set; } = 10;
+	[Step( 1 ), MinMax( 1,20 )] int SmoothingPasses { get; set; } = 10;
 	[Group( "Domain Warping" )] bool DomainWarping { get; set; } = true;
-	[Group( "Domain Warping" )][Range( 0.1f, 1f, 0.01f, true, true )] float DomainWarpingSize { get; set; } = 0.25f;
-	[Group( "Domain Warping" )][Range( 0.1f, 1f, 0.01f, true, true )] float DomainWarpingStrength { get; set; } = 0.15f;
+	[Group( "Domain Warping" )][Step( 0.01f ),MinMax(0.1f,1f)] float DomainWarpingSize { get; set; } = 0.25f;
+	[Group( "Domain Warping" )][Step( 0.01f ),MinMax(0.1f,1f)] float DomainWarpingStrength { get; set; } = 0.15f;
 	bool ErosionSimulation { get; set; } = false;
-	[Range( 1f, 25f, 1f, true, true )] int NoiseLayerStacks { get; set; } = 1;
+	[Step( 1f),MinMax(1f,25f)] int NoiseLayerStacks { get; set; } = 1;
 
 	///
 	/// River Carving Variables
 	///
-	[Group( "River & Stream Carving" )] bool RiverCarvingBool { get; set; } = true;
-	[Group( "River & Stream Carving" )][Range( 0.5f, 10f, 0.1f, true, true )] float RiverCarvingFrequency { get; set; } = 1.5f;
-	[Group( "River & Stream Carving" )][Range( 0.01f, 5f, 0.01f, true, true )] float RiverCarvingStrength { get; set; } = 0.3f;
-	[Group( "River & Stream Carving" )][Range( 0.01f, 0.25f, 0.001f, true, true )] float RiverCarvingDepth { get; set; } = 0.01f;
-	[Group( "River & Stream Carving" )][Range( 0.001f, 2f, 0.01f, true, true )] float RiverCarvingWidth { get; set; } = 0.25f;
-	[Group( "River & Stream Carving" )][Range( 0.05f, 1f, 0.01f, true, true )] float RiverCarvingSpacing { get; set; } = 0.05f;
-	[Group( "River & Stream Carving" )][Range( 0.01f, 1f, 0.01f, true, true )] float RiverCarvingTurbulenceStrength { get; set; } = 0.01f;
-	[Group( "River & Stream Carving" )][Range( 0.01f, 10f, 0.01f, true, true )] float RiverCarvingTurbulenceFrequency { get; set; } = 0.01f;
+	[Property][Group( "River & Stream Carving" )] bool RiverCarvingBool { get; set; } = true;
+	[Property][Group( "River & Stream Carving" )][Step( 0.1f), MinMax( 0.5f, 10f )] float RiverCarvingFrequency { get; set; } = 1.5f;
+	[Property][Group( "River & Stream Carving" )][Step( 0.01f),MinMax(0.01f,5f)] float RiverCarvingStrength { get; set; } = 0.3f;
+	[Property][Group( "River & Stream Carving" )][Step( 0.001f),MinMax(0.01f,0.25f)] float RiverCarvingDepth { get; set; } = 0.01f;
+	[Property][Group( "River & Stream Carving" )][Step( 0.01f),MinMax(0.001f,2f)] float RiverCarvingWidth { get; set; } = 0.25f;
+	[Property][Group( "River & Stream Carving" )][Step( 0.01f),MinMax(0.05f,1f)] float RiverCarvingSpacing { get; set; } = 0.05f;
+	[Property][Group( "River & Stream Carving" )][Step( 0.01f),MinMax(0.01f,1f)] float RiverCarvingTurbulenceStrength { get; set; } = 0.01f;
+	[Property][Group( "River & Stream Carving" )][Step( 0.01f),MinMax(0.01f,10f)] float RiverCarvingTurbulenceFrequency { get; set; } = 0.01f;
 	
 
 	///
 	/// Tool Placement Square
 	///
 	[Group( "Tool Placement" )] bool StagingArea { get; set; } = true;
-	[Group( "Tool Placement" )][Range( 1, 100, 1, true, true )] int StagingAreaSize { get; set; } = 10; // Size of the square (in grid units)
-	[Group( "Tool Placement" )][Range( 0, 1, 0.01f, true, true )] float StagingAreaHeight { get; set; } = 0.1f; // Height of the flat square
-	[Group( "Tool Placement" )][Range( 0, 1, 0.01f, true, true )] float StagingAreaX { get; set; } = 0.1f; // X-center of the square as a ratio
-	[Group( "Tool Placement" )][Range( 0, 1, 0.01f, true, true )] float StagingAreaY { get; set; } = 0.1f; // Y-center of the square as a ratio
+	[Group( "Tool Placement" )][Step( 1),MinMax( 1, 100 )] int StagingAreaSize { get; set; } = 10; // Size of the square (in grid units)
+	[Group( "Tool Placement" )][Step(0.01f),MinMax(0,1)] float StagingAreaHeight { get; set; } = 0.1f; // Height of the flat square
+	[Group( "Tool Placement" )][Step(0.01f),MinMax(0,1)] float StagingAreaX { get; set; } = 0.1f; // X-center of the square as a ratio
+	[Group( "Tool Placement" )][Step(0.01f),MinMax(0,1)] float StagingAreaY { get; set; } = 0.1f; // Y-center of the square as a ratio
 
 	Gradient SplatMapGradient = new Gradient( new Gradient.ColorFrame( 0.0f, Color.Cyan ), new Gradient.ColorFrame( 0.25f, Color.Red ), new Gradient.ColorFrame( 0.5f, Color.Yellow ), new Gradient.ColorFrame( 0.75f, Color.Green ) );
 	SKColor[] _splatcolors { get; set; }
@@ -644,13 +644,13 @@ public class TerrainGenerationTool : Widget
 			GeneratePreviewFile( GenerationPath );
 
 			//_terrain.HeightMap.Update( _heightmap_byte ,0,0, (int)TerrainDimensionsEnum , (int)TerrainDimensionsEnum );
-
+			BaseFileSystem fileSystem = Editor.FileSystem.Mounted;
 			string preview_image_path = Path.Combine( GenerationLocalPath, $"TerrainGenerationUtility_preview.png" );
-			_preview_image_texture = Texture.Load( Editor.FileSystem.Mounted, preview_image_path );
+			_preview_image_texture = Texture.LoadFromFileSystem( preview_image_path, fileSystem );
 			PreviewImage.Texture = _preview_image_texture;
 
 			string preview_splatmap_path = Path.Combine( GenerationLocalPath, $"TerrainGenerationUtility_splat_preview.png" );
-			_preview_splatmap_texture = Texture.Load( Editor.FileSystem.Mounted, preview_splatmap_path );
+			_preview_splatmap_texture = Texture.LoadFromFileSystem( preview_splatmap_path, fileSystem );
 			PreviewSplatmap.Texture = _preview_splatmap_texture;
 
 			ExportButton.Enabled = true;
