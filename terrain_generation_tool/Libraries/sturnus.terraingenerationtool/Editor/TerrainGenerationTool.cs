@@ -89,9 +89,9 @@ public class TerrainGenerationTool : Widget
 	float[,] _splatmap;
 
 	Texture _preview_image_texture;
-	Editor.TextureEditor.Preview PreviewImage;
+	Editor.TextureWidget PreviewImage;
 	Texture _preview_splatmap_texture;
-	Editor.TextureEditor.Preview PreviewSplatmap;
+	Editor.TextureWidget PreviewSplatmap;
 
 	SegmentedControl ShapeArray;
 	SegmentedControl CategoryArray;
@@ -514,12 +514,12 @@ public class TerrainGenerationTool : Widget
 
 		var LayoutRow = Layout.AddRow( 1 );
 		//var PreviewLabel = Layout.Add( new Label( "Preview" ) ); //Will attempt to get this working in a future update.
-		var _image_preview = new Editor.TextureEditor.Preview( this );
+		var _image_preview = new Editor.TextureWidget();
 		_image_preview.Texture = _preview_image_texture;
 		_image_preview.Size = new Vector2( 512, 512 );
 		PreviewImage = LayoutRow.Add( _image_preview, 50 );
 
-		var _splatmap_preview = new Editor.TextureEditor.Preview( this );
+		var _splatmap_preview = new Editor.TextureWidget();
 		_splatmap_preview.Texture = _preview_splatmap_texture;
 		_splatmap_preview.Size = new Vector2( 512, 512 );
 		PreviewSplatmap = LayoutRow.Add( _splatmap_preview, 50 );

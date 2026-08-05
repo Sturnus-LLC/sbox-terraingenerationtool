@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Sandbox;
 
 namespace Sturnus.TerrainGenerationTool.ThreeDimensionalTerrain;
@@ -9,9 +10,10 @@ namespace Sturnus.TerrainGenerationTool.ThreeDimensionalTerrain;
 		private VoxelStorage _storage;
 		private SceneObject _sceneObject;
 
+		[StructLayout( LayoutKind.Sequential )]
 		public struct Vertex
 		{
-			public Vector3 Position;
+			[VertexLayout.Position] public Vector3 Position;
 
 			public Vertex( Vector3 position )
 			{
@@ -92,13 +94,8 @@ namespace Sturnus.TerrainGenerationTool.ThreeDimensionalTerrain;
 				indices.AddRange( generated.Indices );
 			}
 
-			// Define VertexAttribute array for positions
-			VertexAttribute[] vertexAttributes = vertices
-				.Select( v => new VertexAttribute( VertexAttributeType.Position, VertexAttributeFormat.Float32 ) )
-				.ToArray();
-
-			// Explicitly specify VertexAttribute type for the vertex buffer
-			mesh.CreateVertexBuffer<VertexAttribute>( vertexAttributes );
+			// Populate the vertex buffer with the actual vertex data
+			mesh.CreateVertexBuffer( vertices.Count, vertices.Select( v => new Vertex( v ) ).ToArray() );
 
 			// Populate the index buffer
 			mesh.SetIndexBufferData( indices.ToArray() );

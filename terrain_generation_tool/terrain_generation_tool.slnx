@@ -2,10 +2,10 @@
   <Configurations>
     <Platform Name="Any CPU" />
   </Configurations>
-  <Project Path="Code/terrain_generation_tool.csproj" />
+  <Project Path="code/terrain_generation_tool.csproj" />
   <Project Path="Editor/terrain_generation_tool.editor.csproj" />
   <Folder Name="/Addons/">
-    <Project Path="A:/SteamLibrary/steamapps/common/sbox/addons/base/Code/Base Library.csproj" />
+    <Project Path="A:/SteamLibrary/steamapps/common/sbox/addons/base/code/Base Library.csproj" />
   </Folder>
   <Folder Name="/Libraries/">
     <Project Path="Libraries/sturnus.terraingenerationtool/Code/terraingenerationtool.csproj" />
@@ -14,6 +14,7 @@
   <Folder Name="/Tools/">
     <Project Path="A:/SteamLibrary/steamapps/common/sbox/addons/tools/Code/Base Editor Library.csproj" />
     <Project Path="A:/SteamLibrary/steamapps/common/sbox/editor/ActionGraph/Code/actiongraph.csproj" />
+    <Project Path="A:/SteamLibrary/steamapps/common/sbox/editor/DooEditor/Code/dooeditor.csproj" />
     <Project Path="A:/SteamLibrary/steamapps/common/sbox/editor/Hammer/Code/hammer.csproj" />
     <Project Path="A:/SteamLibrary/steamapps/common/sbox/editor/MovieMaker/Code/moviemaker.csproj" />
     <Project Path="A:/SteamLibrary/steamapps/common/sbox/editor/ShaderGraph/Code/shadergraph.csproj" />
