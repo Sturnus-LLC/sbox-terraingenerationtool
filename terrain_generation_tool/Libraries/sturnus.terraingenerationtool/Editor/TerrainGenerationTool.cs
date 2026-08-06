@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Drawing;
@@ -21,7 +21,7 @@ using Sandbox.Services;
 using System.Reflection;
 using static TerrainGenerationTool;
 
-[EditorApp( "Terrain Generation Tool", "terrain", "Generate procedural terrain with a realtime 3D preview" )]
+[EditorApp( "Terrain Pro Generation", "terrain", "Generate procedural terrain with a realtime 3D preview" )]
 public class TerrainGenerationTool : BaseWindow
 {
 	public string GenerationPath { get; set; } = Editor.FileSystem.Content.GetFullPath( "" ) + "\\TerrainGenerationTool\\";
@@ -30,6 +30,36 @@ public class TerrainGenerationTool : BaseWindow
 
 	HashSet<string> TerrainCategoryArray { get; set; } = new HashSet<string>();
 	HashSet<string> TerrainShapeArray { get; set; } = new HashSet<string>();
+
+	// Per-tile category/shape selections for the tile grid (index = ty * grid + tx)
+	string[] _tileCategories = new string[1];
+	string[] _tileShapes = new string[1];
+
+	// Per-tile height/scale/seed values (index = ty * grid + tx)
+	float[] _tileMinHeights = new float[1];
+	float[] _tileMaxHeights = new float[1];
+	float[] _tilePlaneScales = new float[1];
+	long[] _tileSeeds = new long[1];
+
+	// Per-tile smoothing/noise values (index = ty * grid + tx)
+	int[] _tileSmoothingPasses = new int[1];
+	int[] _tileNoiseLayerStacks = new int[1];
+
+	// Per-tile domain warping values (index = ty * grid + tx)
+	bool[] _tileDomainWarping = new bool[1];
+	float[] _tileDomainWarpingSizes = new float[1];
+	float[] _tileDomainWarpingStrengths = new float[1];
+
+	// Per-tile splatmap settings (index = ty * grid + tx)
+	int[] _tileSplatLayerCounts = new int[1];
+	int[] _tileSplatMapCounts = new int[1];
+	SplatDispersionMode[] _tileSplatDispersions = new SplatDispersionMode[1];
+	float[] _tileSplatBlendStrengths = new float[1];
+
+	// The tile currently being edited by the Terrain Type page's Category/Shape selectors
+	int _selectedTileIndex = 0;
+	bool _syncingTileSelectors;
+	List<TileGridBox> _tileBoxes = new();
 
 	List<Type> terrainCategoryClassesTypes = new List<Type> { typeof( Islands ), typeof( Mountainous ), typeof( Planetary ), typeof( Realistic ), typeof( Sea ), typeof( Volcanic ) };
 	List<Type> terrainShapeMethodTypes { get; set; }
@@ -44,6 +74,23 @@ public class TerrainGenerationTool : BaseWindow
 		X8192 = 8192
 	}
 
+	/// <summary>
+	/// How the grid is stored once generated.
+	/// Combined stitches every cell into one full-res map; PerCell keeps each cell as its own
+	/// full-resolution heightmap/splatmap (for per-terrain apply, per-cell export and preview).
+	/// </summary>
+	public enum GridStorageMode
+	{
+		Combined,
+		PerCell
+	}
+
+	[Step( 1 )] GridStorageMode GridStorage { get; set; } = GridStorageMode.Combined;
+
+	// Per-cell full-resolution maps (index = ty * grid + tx). Only filled in PerCell mode.
+	List<float[,]> _cellHeightmaps = new();
+	List<float[,]> _cellSplatmaps = new();
+
 	public enum SplatDispersionMode
 	{
 		Evenly,
@@ -55,6 +102,7 @@ public class TerrainGenerationTool : BaseWindow
 	DynamicEnum TerrainShapeEnum = new DynamicEnum();
 
 	TerrainDimensions TerrainDimensionsEnum { get; set; } = TerrainDimensions.x512;
+	[Step( 1 ), MinMax( 1, 4 )] int TerrainGridSize { get; set; } = 1;
 	//TerrainCategoryEnum TerrainShapeEnumSelect { get; set; }
 	[Step( 0.01f ),MinMax(0.1f,1f)] float TerrainMinHeight { get; set; } = 0.2f;
 	[Step( 0.01f),MinMax(0.1f,1f)] float TerrainMaxHeight { get; set; } = 0.5f;
@@ -128,6 +176,7 @@ public class TerrainGenerationTool : BaseWindow
 	float[,] _overlaySplatmap;
 	bool _overlayUseSplatColors;
 	bool _overlayAnimating;
+	bool _overlayColorAnimating;
 	List<Color> _splatColorCache = new();
 	List<float> _currentFrameTimes;
 	List<float> _targetFrameTimes;
@@ -159,6 +208,7 @@ public class TerrainGenerationTool : BaseWindow
 	SegmentedControl _propsTabBar;
 	Widget _propsContent;
 	string _activePropsTab;
+	Widget _tilesContainer;
 	Button _randomizeMaterialsButton;
 	Label _materialLoadingLabel;
 	GradientControlWidget _gradientControlWidget;
@@ -391,9 +441,14 @@ public class TerrainGenerationTool : BaseWindow
 		CategoryArray.OnSelectedChanged += ( _ ) =>
 		{
 			RebuildShapes();
+			ApplySelectedCategory();
 			_previewDirty = true;
 		};
-		ShapeArray.OnSelectedChanged += ( _ ) => _previewDirty = true;
+		ShapeArray.OnSelectedChanged += ( _ ) =>
+		{
+			ApplySelectedShape();
+			_previewDirty = true;
+		};
 		if ( CategoryArray.Children.Count() > 0 )
 		{
 			CategoryArray.SelectedIndex = 0;
@@ -535,6 +590,28 @@ public class TerrainGenerationTool : BaseWindow
 
 		body.AddSpacingCell( 5 );
 
+		// ---------- Tile grid section (docked between props and actions) ----------
+		var tileGridSection = body.Add( new Widget( null ) );
+		tileGridSection.Layout = Layout.Column();
+		tileGridSection.Layout.Spacing = 4;
+
+		tileGridSection.Layout.Add( new Label( "Tile Grid" ) );
+		tileGridSection.Layout.Add( IntSlider( nameof( TerrainGridSize ) ) );
+		tileGridSection.Layout.Add( new Label( "Storage" ) );
+		tileGridSection.Layout.Add( new EnumControlWidget( _serialized.GetProperty( nameof( GridStorage ) ) ) );
+		var tileGridHint = new Label( "Click a tile to select which cell the Terrain Type category and shape apply to. Click 'All' to set every tile at once." );
+		tileGridHint.SetStyles( "font-size: 10px; color: #888;" );
+		tileGridHint.WordWrap = true;
+		tileGridHint.MaximumWidth = 260;
+		tileGridSection.Layout.Add( tileGridHint );
+
+		_tilesContainer = new Widget( null );
+		_tilesContainer.Layout = Layout.Column();
+		_tilesContainer.Layout.Spacing = 4;
+		tileGridSection.Layout.Add( _tilesContainer );
+
+		body.AddSpacingCell( 5 );
+
 		var GenerateButton = body.Add( new Button.Primary( "Generate", "auto_awesome", this ) );
 
 		var ExportButton = body.Add( new Button( "Export", "file_download", this ) );
@@ -555,32 +632,75 @@ public class TerrainGenerationTool : BaseWindow
 			BuildSplatColors();
 
 			int fullRes = (int)TerrainDimensionsEnum;
-			_heightmap = BuildHeightmap(
-				fullRes, fullRes,
-				CategoryArray.Selected, ShapeArray.Selected,
-				TerrainSeed, NoiseLayerStacks, TerrainMinHeight, TerrainMaxHeight,
-				DomainWarping, DomainWarpingSize, DomainWarpingStrength,
-				SmoothingPasses, TerrainPlaneScale,
-				RiverCarvingBool, RiverCarvingFrequency, RiverCarvingWidth, RiverCarvingDepth,
-				RiverCarvingTurbulenceFrequency, RiverCarvingTurbulenceStrength, RiverCarvingSpacing,
-				StagingArea, StagingAreaSize, StagingAreaHeight, StagingAreaX, StagingAreaY );
+
+			if ( GridStorage == GridStorageMode.PerCell )
+			{
+				// Each cell is its own full-resolution map - no stitching.
+				_cellHeightmaps = BuildPerCellHeightmaps(
+					fullRes, fullRes,
+					(string[])_tileCategories.Clone(), (string[])_tileShapes.Clone(),
+					(long[])_tileSeeds.Clone(), (int[])_tileNoiseLayerStacks.Clone(),
+					(float[])_tileMinHeights.Clone(), (float[])_tileMaxHeights.Clone(),
+					(bool[])_tileDomainWarping.Clone(), (float[])_tileDomainWarpingSizes.Clone(), (float[])_tileDomainWarpingStrengths.Clone(),
+					(int[])_tileSmoothingPasses.Clone(), (float[])_tilePlaneScales.Clone(),
+					RiverCarvingBool, RiverCarvingFrequency, RiverCarvingWidth, RiverCarvingDepth,
+					RiverCarvingTurbulenceFrequency, RiverCarvingTurbulenceStrength, RiverCarvingSpacing,
+					StagingArea, StagingAreaSize, StagingAreaHeight, StagingAreaX, StagingAreaY );
+
+				if ( _cellHeightmaps.Count == 0 )
+				{
+					Log.Error( "No per-cell heightmaps generated. Aborting." );
+					return;
+				}
+
+				_cellSplatmaps = BuildPerCellSplatmaps( _cellHeightmaps,
+					(int[])_tileSplatLayerCounts.Clone(), (SplatDispersionMode[])_tileSplatDispersions.Clone(), (float[])_tileSplatBlendStrengths.Clone() );
+
+				// A stitched preview map so the 3D preview still shows the whole grid tiled.
+				_heightmap = BuildHeightmap(
+					fullRes, fullRes,
+					(string[])_tileCategories.Clone(), (string[])_tileShapes.Clone(), TerrainGridSize,
+					(long[])_tileSeeds.Clone(), (int[])_tileNoiseLayerStacks.Clone(),
+					(float[])_tileMinHeights.Clone(), (float[])_tileMaxHeights.Clone(),
+					(bool[])_tileDomainWarping.Clone(), (float[])_tileDomainWarpingSizes.Clone(), (float[])_tileDomainWarpingStrengths.Clone(),
+					(int[])_tileSmoothingPasses.Clone(), (float[])_tilePlaneScales.Clone(),
+					RiverCarvingBool, RiverCarvingFrequency, RiverCarvingWidth, RiverCarvingDepth,
+					RiverCarvingTurbulenceFrequency, RiverCarvingTurbulenceStrength, RiverCarvingSpacing,
+					StagingArea, StagingAreaSize, StagingAreaHeight, StagingAreaX, StagingAreaY );
+			}
+			else
+			{
+				_heightmap = BuildHeightmap(
+					fullRes, fullRes,
+					(string[])_tileCategories.Clone(), (string[])_tileShapes.Clone(), TerrainGridSize,
+					(long[])_tileSeeds.Clone(), (int[])_tileNoiseLayerStacks.Clone(),
+					(float[])_tileMinHeights.Clone(), (float[])_tileMaxHeights.Clone(),
+					(bool[])_tileDomainWarping.Clone(), (float[])_tileDomainWarpingSizes.Clone(), (float[])_tileDomainWarpingStrengths.Clone(),
+					(int[])_tileSmoothingPasses.Clone(), (float[])_tilePlaneScales.Clone(),
+					RiverCarvingBool, RiverCarvingFrequency, RiverCarvingWidth, RiverCarvingDepth,
+					RiverCarvingTurbulenceFrequency, RiverCarvingTurbulenceStrength, RiverCarvingSpacing,
+					StagingArea, StagingAreaSize, StagingAreaHeight, StagingAreaX, StagingAreaY );
+
+				_cellHeightmaps = null;
+				_cellSplatmaps = null;
+			}
+
 			if ( _heightmap == null )
 			{
 				Log.Error( "Heightmap is not generated. Aborting." );
 				return;
 			}
 
-			_splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+			_splatmap = BuildTileGridSplatmap( _heightmap, TerrainGridSize,
+				(int[])_tileSplatLayerCounts.Clone(), (SplatDispersionMode[])_tileSplatDispersions.Clone(), (float[])_tileSplatBlendStrengths.Clone() );
 
-			GeneratePreviewFile( GenerationPath );
+			// Write the preview files for the asset folder, and build fresh textures for the widgets
+			GeneratePreviewFile( GenerationPath, out var previewBitmap, out var splatBitmap );
 
-			BaseFileSystem fileSystem = Editor.FileSystem.Mounted;
-			string preview_image_path = Path.Combine( GenerationLocalPath, $"TerrainGenerationUtility_preview.png" );
-			_preview_image_texture = Texture.LoadFromFileSystem( preview_image_path, fileSystem );
+			_preview_image_texture = TextureFromBitmap( previewBitmap );
 			PreviewImage.Texture = _preview_image_texture;
 
-			string preview_splatmap_path = Path.Combine( GenerationLocalPath, $"TerrainGenerationUtility_splat_preview.png" );
-			_preview_splatmap_texture = Texture.LoadFromFileSystem( preview_splatmap_path, fileSystem );
+			_preview_splatmap_texture = TextureFromBitmap( splatBitmap );
 			PreviewSplatmap.Texture = _preview_splatmap_texture;
 
 			ExportButton.Enabled = true;
@@ -600,7 +720,7 @@ public class TerrainGenerationTool : BaseWindow
 		ApplyButton.Clicked += () =>
 		{
 			IDictionary<string, Action> WarnDiaglog = new Dictionary<string, Action>(); ;
-			WarnDiaglog.Add( "Apply", UpdateTerrain );
+			WarnDiaglog.Add( "Apply", GridStorage == GridStorageMode.PerCell ? UpdatePerCellTerrains : UpdateTerrain );
 			var PopUpWarn = new PopupWindow( "Warning: Terrain Override", "This will override your current scene's terrain data.","Cancel", WarnDiaglog );
 			PopUpWarn.Show();
 		};
@@ -708,6 +828,7 @@ public class TerrainGenerationTool : BaseWindow
 		zoomRow.Add( new IconButton( "zoom_in", () => ZoomSlider.Value = MathF.Min( ZoomSlider.Maximum, ZoomSlider.Value + 500f ), this ) { IconSize = 16, FixedSize = new Vector2( 22, 22 ) } );
 
 		ApplyConditionalVisibility();
+		RebuildTileGridUI();
 		LoadFacepunchMaterialsAsync();
 		RegeneratePreview();
 		Show();
@@ -723,23 +844,78 @@ public class TerrainGenerationTool : BaseWindow
 
 		switch ( prop.Name )
 		{
+			case nameof( TerrainGridSize ):
+				RebuildTileGridUI();
+				break;
+			case nameof( GridStorage ):
+				// Reset stored per-cell maps when the storage mode changes so stale data isn't applied/exported
+				_cellHeightmaps = null;
+				_cellSplatmaps = null;
+				break;
+			case nameof( TerrainMinHeight ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( minHeight: TerrainMinHeight );
+				break;
+			case nameof( TerrainMaxHeight ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( maxHeight: TerrainMaxHeight );
+				break;
+			case nameof( TerrainPlaneScale ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( planeScale: TerrainPlaneScale );
+				break;
+			case nameof( TerrainSeed ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( seed: TerrainSeed );
+				break;
+			case nameof( SmoothingPasses ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( smoothing: SmoothingPasses );
+				break;
+			case nameof( NoiseLayerStacks ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( noiseLayers: NoiseLayerStacks );
+				break;
 			case nameof( DomainWarping ):
 				SetWidgetsVisible( _domainWarpingWidgets, DomainWarping );
+				if ( !_syncingTileSelectors ) WriteSelectedValues( warp: DomainWarping );
 				break;
-			case nameof( RiverCarvingBool ):
-				SetWidgetsVisible( _riverCarvingWidgets, RiverCarvingBool );
+			case nameof( DomainWarpingSize ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( warpSize: DomainWarpingSize );
+				break;
+			case nameof( DomainWarpingStrength ):
+				if ( !_syncingTileSelectors ) WriteSelectedValues( warpStrength: DomainWarpingStrength );
 				break;
 			case nameof( StagingArea ):
 				SetWidgetsVisible( _stagingAreaWidgets, StagingArea );
 				break;
 			case nameof( SplatLayerCount ):
 			case nameof( SplatDispersion ):
+			case nameof( SplatBlendStrength ):
+			case nameof( SplatMapCount ):
+				if ( !_syncingTileSelectors )
+				{
+					WriteSelectedValues(
+						splatLayers: prop.Name == nameof( SplatLayerCount ) ? SplatLayerCount : (int?)null,
+						splatMaps: prop.Name == nameof( SplatMapCount ) ? SplatMapCount : (int?)null,
+						splatDispersion: prop.Name == nameof( SplatDispersion ) ? SplatDispersion : (SplatDispersionMode?)null,
+						splatBlend: prop.Name == nameof( SplatBlendStrength ) ? SplatBlendStrength : (float?)null );
+				}
+
 				// Resample the gradient into evenly spaced stops so the colors/thresholds match the layer count
 				ResampleSplatGradient();
 				if ( PreviewSplatMaterials )
 				{
 					_previewMaterials = null;
 					RandomizeMaterialsAsync();
+				}
+				break;
+			case nameof( SplatMapGradient ):
+				// The user edited the gradient colors in the widget - make that the source of
+				// truth so later resamples keep their colors instead of falling back to the
+				// stale random cache.
+				if ( !_isAnimatingGradient )
+				{
+					_splatColorCache.Clear();
+					if ( SplatMapGradient.Colors != null )
+					{
+						foreach ( var frame in SplatMapGradient.Colors )
+							_splatColorCache.Add( frame.Value );
+					}
 				}
 				break;
 			case nameof( PreviewSplatMaterials ):
@@ -755,9 +931,24 @@ public class TerrainGenerationTool : BaseWindow
 		}
 	}
 
+	/// <summary>
+	/// The largest splat layer count across all tiles (so shared resources like the preview
+	/// material list and gradient cover every tile). Falls back to the global value.
+	/// </summary>
+	int MaxTileSplatLayers()
+	{
+		int max = Math.Max( SplatLayerCount, 2 );
+		if ( _tileSplatLayerCounts != null )
+		{
+			foreach ( var lc in _tileSplatLayerCounts )
+				max = Math.Max( max, lc );
+		}
+		return max;
+	}
+
 	void ResampleSplatGradient()
 	{
-		int layerCount = Math.Max( SplatLayerCount, 2 );
+		int layerCount = MaxTileSplatLayers();
 
 		// Seed the persistent color cache from the current gradient first so user edits are kept.
 		if ( _splatColorCache.Count == 0 && SplatMapGradient.Colors != null && SplatMapGradient.Colors.Count() > 0 )
@@ -1037,7 +1228,7 @@ public class TerrainGenerationTool : BaseWindow
 			_materialLoadingLabel.Visible = true;
 		}
 
-		int layerCount = Math.Max( SplatLayerCount, 2 );
+		int layerCount = MaxTileSplatLayers();
 		int gen = ++_previewMaterialsGeneration;
 
 		try
@@ -1172,6 +1363,13 @@ public class TerrainGenerationTool : BaseWindow
 		// Morph the overlay mesh toward its target shape every frame
 		UpdateOverlayAnimation();
 
+		// If a tile was just selected/deselected, keep rebuilding the overlay mesh so the
+		// grey-out smoothly eases in until the colors settle.
+		if ( _overlayColorAnimating )
+		{
+			BuildOverlayMesh();
+		}
+
 		// Animate the gradient color stops sliding in/out
 		UpdateGradientAnimation();
 
@@ -1198,17 +1396,21 @@ public class TerrainGenerationTool : BaseWindow
 		BuildSplatColors();
 
 		// Snapshot UI-driven values on the main thread so the background task doesn't touch widgets
-		string category = CategoryArray.Selected;
-		string shape = ShapeArray.Selected;
-		long seed = TerrainSeed;
-		int noiseLayers = NoiseLayerStacks;
-		float minHeight = TerrainMinHeight;
-		float maxHeight = TerrainMaxHeight;
-		bool warp = DomainWarping;
-		float warpSize = DomainWarpingSize;
-		float warpStrength = DomainWarpingStrength;
-		int smoothing = SmoothingPasses;
-		float planeScale = TerrainPlaneScale;
+		var tileCategories = (string[])_tileCategories.Clone();
+		var tileShapes = (string[])_tileShapes.Clone();
+		var tileSeeds = (long[])_tileSeeds.Clone();
+		var tileMinHeights = (float[])_tileMinHeights.Clone();
+		var tileMaxHeights = (float[])_tileMaxHeights.Clone();
+		var tilePlaneScales = (float[])_tilePlaneScales.Clone();
+		var tileSmoothing = (int[])_tileSmoothingPasses.Clone();
+		var tileNoiseLayers = (int[])_tileNoiseLayerStacks.Clone();
+		var tileWarping = (bool[])_tileDomainWarping.Clone();
+		var tileWarpingSizes = (float[])_tileDomainWarpingSizes.Clone();
+		var tileWarpingStrengths = (float[])_tileDomainWarpingStrengths.Clone();
+		var tileSplatLayerCounts = (int[])_tileSplatLayerCounts.Clone();
+		var tileSplatDispersions = (SplatDispersionMode[])_tileSplatDispersions.Clone();
+		var tileSplatBlends = (float[])_tileSplatBlendStrengths.Clone();
+		int gridSize = TerrainGridSize;
 		bool rivers = RiverCarvingBool;
 		float riverFrequency = RiverCarvingFrequency;
 		float riverWidth = RiverCarvingWidth;
@@ -1227,10 +1429,10 @@ public class TerrainGenerationTool : BaseWindow
 			// CPU-heavy work (noise, smoothing, rivers, splatmap) runs off the main thread
 			float[,] heightmap = await Task.Run( () => BuildHeightmap(
 				PreviewResolution, PreviewResolution,
-				category, shape,
-				seed, noiseLayers, minHeight, maxHeight,
-				warp, warpSize, warpStrength,
-				smoothing, planeScale,
+				tileCategories, tileShapes, gridSize,
+				tileSeeds, tileNoiseLayers, tileMinHeights, tileMaxHeights,
+				tileWarping, tileWarpingSizes, tileWarpingStrengths,
+				tileSmoothing, tilePlaneScales,
 				rivers, riverFrequency, riverWidth, riverDepth,
 				riverTurbFreq, riverTurbStrength, riverSpacing,
 				staging, stagingSize, stagingHeight, stagingX, stagingY ) );
@@ -1335,21 +1537,52 @@ public class TerrainGenerationTool : BaseWindow
 
 	void BuildSplatColors()
 	{
-		// Build evenly spaced thresholds and sample the gradient for each layer color
-		int layerCount = Math.Max( SplatLayerCount, 2 );
+		// The colors must be sampled at the ACTUAL threshold positions the splatmap uses, not at
+		// evenly spaced positions. In Natural dispersion the layers sit at slope-weighted stops,
+		// so even sampling would skip/misalign colors. The gradient's frame times ARE the
+		// thresholds (ResampleSplatGradient positions them there), so read them directly.
+		int layerCount = MaxTileSplatLayers();
 
-		var _splatthresholdtime = new List<float>();
-		var _splatmapgradients = new List<SKColor>();
+		var frames = SplatMapGradient.Colors;
+		if ( frames != null && frames.Count() == layerCount && layerCount > 0 )
+		{
+			// Frames are ordered by time - use their exact positions and colors so the splatmap
+			// and shader reflect exactly what the user set in the gradient widget.
+			var times = new float[layerCount];
+			var colors = new SKColor[layerCount];
+			int i = 0;
+			foreach ( var frame in frames )
+			{
+				times[i] = Math.Clamp( frame.Time, 0f, 1f );
+				var c = frame.Value.ToColor32();
+				colors[i] = new SKColor( c.r, c.g, c.b, c.a );
+				i++;
+			}
+			_splatthresholds = times;
+			_splatcolors = colors;
+			return;
+		}
+
+		// Fallback: no matching frame count yet (e.g. first build) - sample the gradient at the
+		// same threshold positions the splatmap will use.
+		float[] stops;
+		var source = _previewHeightmap ?? _heightmap;
+		if ( SplatDispersion == SplatDispersionMode.Natural && source != null )
+			stops = ComputeNaturalThresholds( source, layerCount );
+		else
+			stops = MakeEvenThresholds( layerCount );
+
+		var thresholdtime = new List<float>();
+		var mapgradients = new List<SKColor>();
 		for ( int i = 0; i < layerCount; i++ )
 		{
-			float t = layerCount <= 1 ? 0f : (float)i / (layerCount - 1);
-			_splatthresholdtime.Add( t );
+			thresholdtime.Add( stops[i] );
 
-			var color = SplatMapGradient.Evaluate( t ).ToColor32();
-			_splatmapgradients.Add( new SKColor( color.r, color.g, color.b, color.a ) );
+			var color = SplatMapGradient.Evaluate( Math.Clamp( stops[i], 0f, 1f ) ).ToColor32();
+			mapgradients.Add( new SKColor( color.r, color.g, color.b, color.a ) );
 		}
-		_splatthresholds = _splatthresholdtime.ToArray();
-		_splatcolors = _splatmapgradients.ToArray();
+		_splatthresholds = thresholdtime.ToArray();
+		_splatcolors = mapgradients.ToArray();
 	}
 
 	void RegeneratePreview()
@@ -1361,10 +1594,11 @@ public class TerrainGenerationTool : BaseWindow
 
 		var heightmap = BuildHeightmap(
 			PreviewResolution, PreviewResolution,
-			CategoryArray.Selected, ShapeArray.Selected,
-			TerrainSeed, NoiseLayerStacks, TerrainMinHeight, TerrainMaxHeight,
-			DomainWarping, DomainWarpingSize, DomainWarpingStrength,
-			SmoothingPasses, TerrainPlaneScale,
+			(string[])_tileCategories.Clone(), (string[])_tileShapes.Clone(), TerrainGridSize,
+			(long[])_tileSeeds.Clone(), (int[])_tileNoiseLayerStacks.Clone(),
+			(float[])_tileMinHeights.Clone(), (float[])_tileMaxHeights.Clone(),
+			(bool[])_tileDomainWarping.Clone(), (float[])_tileDomainWarpingSizes.Clone(), (float[])_tileDomainWarpingStrengths.Clone(),
+			(int[])_tileSmoothingPasses.Clone(), (float[])_tilePlaneScales.Clone(),
 			RiverCarvingBool, RiverCarvingFrequency, RiverCarvingWidth, RiverCarvingDepth,
 			RiverCarvingTurbulenceFrequency, RiverCarvingTurbulenceStrength, RiverCarvingSpacing,
 			StagingArea, StagingAreaSize, StagingAreaHeight, StagingAreaX, StagingAreaY );
@@ -1380,6 +1614,11 @@ public class TerrainGenerationTool : BaseWindow
 		if ( _previewStorage is null ) return;
 
 		int res = heightmap.GetLength( 0 );
+
+		// Resize the storage to match the incoming heightmap so Generate (full res) and the
+		// live preview (PreviewResolution) both work without a buffer size mismatch.
+		if ( _previewStorage.Resolution != res )
+			_previewStorage.SetResolution( res );
 
 		// Write the heightmap into the terrain storage (0..65535 maps across TerrainHeight)
 		ushort[] heightArray = new ushort[res * res];
@@ -1402,7 +1641,8 @@ public class TerrainGenerationTool : BaseWindow
 
 		if ( useMaterials )
 		{
-			float[,] splatmap = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+			float[,] splatmap = BuildTileGridSplatmap( heightmap, TerrainGridSize,
+				(int[])_tileSplatLayerCounts.Clone(), (SplatDispersionMode[])_tileSplatDispersions.Clone(), (float[])_tileSplatBlendStrengths.Clone() );
 
 			int matCount = _previewMaterials.Length;
 			for ( int y = 0; y < res; y++ )
@@ -1494,7 +1734,8 @@ public class TerrainGenerationTool : BaseWindow
 		// are evaluated from the LIVE gradient each frame so they stay in sync with the widget.
 		_overlayUseSplatColors = splatColors;
 		if ( splatColors )
-			_overlaySplatmap = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+			_overlaySplatmap = BuildTileGridSplatmap( heightmap, TerrainGridSize,
+				(int[])_tileSplatLayerCounts.Clone(), (SplatDispersionMode[])_tileSplatDispersions.Clone(), (float[])_tileSplatBlendStrengths.Clone() );
 
 		if ( first )
 			BuildOverlayMesh();
@@ -1552,12 +1793,22 @@ public class TerrainGenerationTool : BaseWindow
 
 		// Color ease factor - the mesh morphs at half the gradient speed so the color
 		// swipe across the terrain is smoother. First build snaps immediately.
-		float colorT = _overlayCurrentColors is null ? 1f : 1f - MathF.Exp( -MeshMorphSpeed * RealTime.Delta );
+		// Tile-selection grey/blue changes use a much faster rate so they snap quicker.
+		float colorMorphSpeed = _overlayColorAnimating ? PreviewMorphSpeed * 4f : MeshMorphSpeed;
+		float colorT = _overlayCurrentColors is null ? 1f : 1f - MathF.Exp( -colorMorphSpeed * RealTime.Delta );
 
 		var vertices = new Vertex[vertexCount];
 		var colors = _overlayCurrentColors ?? new Color32[vertexCount];
 
 		bool useSplat = _overlayUseSplatColors && _overlaySplatmap != null;
+
+		// When a specific tile is selected, only that tile keeps its colors - the rest go grey
+		int grid = Math.Max( TerrainGridSize, 1 );
+		int tileW = res / grid;
+		int tileH = res / grid;
+
+		// Track how far the colors moved so the refresh can stop once they settle
+		float[] maxColorDelta = new float[1];
 
 		Parallel.For( 0, res, y =>
 		{
@@ -1579,24 +1830,52 @@ public class TerrainGenerationTool : BaseWindow
 
 				Vector3 normal = new Vector3( -dx, -dy, 1.0f ).Normal;
 
+				// Which grid tile does this vertex belong to?
+				int tileX = Math.Min( x / Math.Max( tileW, 1 ), grid - 1 );
+				int tileY = Math.Min( y / Math.Max( tileH, 1 ), grid - 1 );
+				int tileIndex = tileY * grid + tileX;
+				bool isSelectedTile = _selectedTileIndex < 0 || tileIndex == _selectedTileIndex;
+
 				// Sample the target color from the LIVE gradient each frame, then ease the
 				// mesh color toward it so the swipe lags behind the widget and looks smooth.
 				Color targetColor;
-				if ( useSplat )
+				if ( !isSelectedTile )
 				{
-					float layerPos = Math.Clamp( _overlaySplatmap[x, y], 0f, SplatLayerCount - 1f );
+					// Wash out everything outside the selected tile
+					targetColor = Color.FromBytes( 235, 235, 235 );
+				}
+				else if ( useSplat )
+				{
+					int tileLayers = _tileSplatLayerCounts != null && tileIndex < _tileSplatLayerCounts.Length
+						? Math.Max( _tileSplatLayerCounts[tileIndex], 2 ) : Math.Max( SplatLayerCount, 2 );
+
+					// Sample the color from the same threshold-aligned color table the splatmap
+					// image uses, so the 3D preview and the exported splatmap always agree.
+					float layerPos = Math.Clamp( _overlaySplatmap[x, y], 0f, tileLayers - 1f );
 					int layer0 = (int)MathF.Floor( layerPos );
-					int layer1 = Math.Min( layer0 + 1, SplatLayerCount - 1 );
+					int layer1 = Math.Min( layer0 + 1, tileLayers - 1 );
 					float t = layerPos - layer0;
 
-					Color c0 = SplatMapGradient.Evaluate( Math.Clamp( layer0 / (float)Math.Max( SplatLayerCount - 1, 1 ), 0f, 1f ) );
-					Color c1 = SplatMapGradient.Evaluate( Math.Clamp( layer1 / (float)Math.Max( SplatLayerCount - 1, 1 ), 0f, 1f ) );
-					targetColor = Color.Lerp( c0, c1, t );
+					if ( _splatcolors != null && _splatcolors.Length > layer1 )
+					{
+						var col0 = _splatcolors[layer0];
+						var col1 = _splatcolors[layer1];
+						targetColor = new Color(
+							MathX.LerpTo( col0.Red / 255f, col1.Red / 255f, t ),
+							MathX.LerpTo( col0.Green / 255f, col1.Green / 255f, t ),
+							MathX.LerpTo( col0.Blue / 255f, col1.Blue / 255f, t ) );
+					}
+					else
+					{
+						Color c0 = SplatMapGradient.Evaluate( Math.Clamp( layer0 / (float)Math.Max( tileLayers - 1, 1 ), 0f, 1f ) );
+						Color c1 = SplatMapGradient.Evaluate( Math.Clamp( layer1 / (float)Math.Max( tileLayers - 1, 1 ), 0f, 1f ) );
+						targetColor = Color.Lerp( c0, c1, t );
+					}
 				}
 				else
 				{
 					// The original height-based material color we painted on the mesh
-					targetColor = Color.Lerp( Color.FromBytes( 60, 90, 40 ), Color.FromBytes( 200, 185, 150 ), h );
+					targetColor = Color.Lerp( Color.FromBytes( 30, 90, 200 ), Color.FromBytes( 200, 185, 150 ), h );
 				}
 
 				var target32 = targetColor.ToColor32();
@@ -1608,12 +1887,21 @@ public class TerrainGenerationTool : BaseWindow
 				byte a = (byte)MathX.LerpTo( current.a, target32.a, colorT );
 				colors[index] = new Color32( r, g, b, a );
 
+				float delta = MathF.Abs( r - target32.r ) + MathF.Abs( g - target32.g ) + MathF.Abs( b - target32.b );
+				maxColorDelta[0] = MathF.Max( maxColorDelta[0], delta );
+
 				vertices[index] = new Vertex( position, normal, normal, new Vector4( 0, 0, 0, 1 ) );
 				vertices[index].Color = colors[index];
 			}
 		} );
 
 		_overlayCurrentColors = colors;
+
+		// Stop the color-only refresh once everything has eased to its target
+		if ( _overlayColorAnimating && maxColorDelta[0] < 1f )
+		{
+			_overlayColorAnimating = false;
+		}
 
 		// Build indices once - the grid topology never changes
 		var indices = new List<int>();
@@ -1655,17 +1943,18 @@ public class TerrainGenerationTool : BaseWindow
 	}
 
 	float[,] BuildHeightmap( int width, int height,
-		string category,
-		string shape,
-		long seed,
-		int layerCount,
-		float minHeight,
-		float maxHeight,
-		bool domainWarping,
-		float domainWarpingSize,
-		float domainWarpingStrength,
-		int smoothingPasses,
-		float terrainPlaneScale,
+		string[] tileCategories,
+		string[] tileShapes,
+		int gridSize,
+		long[] tileSeeds,
+		int[] tileNoiseLayerStacks,
+		float[] tileMinHeights,
+		float[] tileMaxHeights,
+		bool[] tileDomainWarping,
+		float[] tileDomainWarpingSizes,
+		float[] tileDomainWarpingStrengths,
+		int[] tileSmoothingPasses,
+		float[] tilePlaneScales,
 		bool riverCarving,
 		float riverFrequency,
 		float riverWidth,
@@ -1679,53 +1968,30 @@ public class TerrainGenerationTool : BaseWindow
 		float stagingAreaX,
 		float stagingAreaY )
 	{
-		var fullclass = Type.GetType( $"Sturnus.TerrainGenerationTool.{category}" );
-		if ( fullclass is null )
-		{
-			Log.Error( $"Class '{category}' not found." );
-			return null;
-		}
-		var fullclassmethod = fullclass.GetMethod( shape );
-		if ( fullclassmethod is null )
-		{
-			Log.Error( $"Method '{shape}' not found." );
-			return null;
-		}
+		int grid = Math.Max( gridSize, 1 );
+		int tileW = width / grid;
+		int tileH = height / grid;
 
-		float[,] heightmap = GenerateStackedNoise(
-			width,
-			height,
-			seed,
-			layerCount,
-			1.0f,
-			2.0f,
-			1.0f,
-			0.5f,
-			( x, y ) => (float)CallMethod( $"Sturnus.TerrainGenerationTool.{category}", shape, new object[] {
-			x, y,
-			width,
-			height,
-			seed,
-			minHeight,
-			domainWarping,
-			domainWarpingSize,
-			domainWarpingStrength
-			} ),
-			maxHeight,
-			smoothingPasses,
-			terrainPlaneScale
-		);
+		// Build each tile's heightmap, then stitch them together averaging overlapping edges.
+		float[,] heightmap = BuildTileGrid( width, height, tileW, tileH, grid, tileCategories, tileShapes, tileSeeds, tileNoiseLayerStacks, tileMinHeights, tileMaxHeights, tileDomainWarping, tileDomainWarpingSizes, tileDomainWarpingStrengths, tileSmoothingPasses, tilePlaneScales );
 
 		if ( ErosionSimulation )
 		{
 
 		}
 
+		if ( heightmap == null )
+		{
+			Log.Error( "Heightmap is not generated. Aborting." );
+			return null;
+		}
+
+		// Rivers are carved across the whole combined map so they flow continuously through the tiles
 		if ( riverCarving )
 		{
 			heightmap = AddTurbulenceForRivers(
 			heightmap,
-			seed: seed,
+			seed: tileSeeds != null && tileSeeds.Length > 0 ? tileSeeds[0] : 0,
 			riverFrequency: riverFrequency,
 			riverWidth: riverWidth,
 			riverDepth: riverDepth,
@@ -1736,12 +2002,6 @@ public class TerrainGenerationTool : BaseWindow
 			terrainNoiseFrequency: 2.0f,
 			terrainNoiseAmplitude: 0.5f
 		);
-		}
-
-		if ( heightmap == null )
-		{
-			Log.Error( "Heightmap is not generated. Aborting." );
-			return null;
 		}
 
 		if ( stagingArea )
@@ -1755,6 +2015,371 @@ public class TerrainGenerationTool : BaseWindow
 		}
 
 		return heightmap;
+	}
+
+	/// <summary>
+	/// Generates each tile with its own category/shape/height/scale/seed, then stitches them into
+	/// one heightmap. Adjacent tiles share a blend band so their edges are averaged and look continuous.
+	/// </summary>
+	float[,] BuildTileGrid( int width, int height, int tileW, int tileH, int grid, string[] categories, string[] shapes, long[] seeds, int[] noiseLayersArr, float[] minHeights, float[] maxHeights, bool[] warpingArr, float[] warpingSizesArr, float[] warpingStrengthsArr, int[] smoothingArr, float[] planeScales )
+	{
+		float[,] result = new float[width, height];
+
+		// Single tile - just generate it directly at the requested size, matching the old behavior exactly.
+		if ( grid <= 1 )
+		{
+			string category = categories != null && categories.Length > 0 ? categories[0] : null;
+			string shape = shapes != null && shapes.Length > 0 ? shapes[0] : null;
+			long seed = seeds != null && seeds.Length > 0 ? seeds[0] : 0;
+			int layerCount = noiseLayersArr != null && noiseLayersArr.Length > 0 ? noiseLayersArr[0] : 1;
+			float minHeight = minHeights != null && minHeights.Length > 0 ? minHeights[0] : 0.2f;
+			float maxHeight = maxHeights != null && maxHeights.Length > 0 ? maxHeights[0] : 0.5f;
+			int smoothingPasses = smoothingArr != null && smoothingArr.Length > 0 ? smoothingArr[0] : 0;
+			float planeScale = planeScales != null && planeScales.Length > 0 ? planeScales[0] : 0.5f;
+			bool domainWarping = warpingArr != null && warpingArr.Length > 0 ? warpingArr[0] : true;
+			float domainWarpingSize = warpingSizesArr != null && warpingSizesArr.Length > 0 ? warpingSizesArr[0] : 0.25f;
+			float domainWarpingStrength = warpingStrengthsArr != null && warpingStrengthsArr.Length > 0 ? warpingStrengthsArr[0] : 0.15f;
+
+			if ( string.IsNullOrEmpty( category ) ) category = "Islands";
+			if ( string.IsNullOrEmpty( shape ) ) shape = "Default";
+
+			var fullclass = Type.GetType( $"Sturnus.TerrainGenerationTool.{category}" );
+			if ( fullclass is null || fullclass.GetMethod( shape ) is null ) return null;
+
+			return GenerateStackedNoise(
+				width, height,
+				seed,
+				layerCount,
+				1.0f, 2.0f, 1.0f, 0.5f,
+				( x, y ) => (float)CallMethod( $"Sturnus.TerrainGenerationTool.{category}", shape, new object[] {
+				x, y,
+				width, height,
+				seed,
+				minHeight,
+				domainWarping,
+				domainWarpingSize,
+				domainWarpingStrength
+				} ),
+				maxHeight,
+				smoothingPasses,
+				planeScale
+			);
+		}
+
+		float[,] weight = new float[width, height];
+
+		// Overlap width for edge blending - a fraction of the tile size so seams blend smoothly
+		int blend = Math.Max( 2, Math.Min( tileW, tileH ) / 8 );
+
+		for ( int ty = 0; ty < grid; ty++ )
+		{
+			for ( int tx = 0; tx < grid; tx++ )
+			{
+				int index = ty * grid + tx;
+
+				string category = categories != null && index < categories.Length && !string.IsNullOrEmpty( categories[index] ) ? categories[index] : "Islands";
+				string shape = shapes != null && index < shapes.Length && !string.IsNullOrEmpty( shapes[index] ) ? shapes[index] : "Default";
+				long tileSeed = seeds != null && index < seeds.Length ? seeds[index] : 0;
+				int layerCount = noiseLayersArr != null && index < noiseLayersArr.Length ? noiseLayersArr[index] : 1;
+				float minHeight = minHeights != null && index < minHeights.Length ? minHeights[index] : 0.2f;
+				float maxHeight = maxHeights != null && index < maxHeights.Length ? maxHeights[index] : 0.5f;
+				int smoothingPasses = smoothingArr != null && index < smoothingArr.Length ? smoothingArr[index] : 0;
+				float planeScale = planeScales != null && index < planeScales.Length ? planeScales[index] : 0.5f;
+				bool domainWarping = warpingArr != null && index < warpingArr.Length ? warpingArr[index] : true;
+				float domainWarpingSize = warpingSizesArr != null && index < warpingSizesArr.Length ? warpingSizesArr[index] : 0.25f;
+				float domainWarpingStrength = warpingStrengthsArr != null && index < warpingStrengthsArr.Length ? warpingStrengthsArr[index] : 0.15f;
+
+				var fullclass = Type.GetType( $"Sturnus.TerrainGenerationTool.{category}" );
+				if ( fullclass is null || fullclass.GetMethod( shape ) is null )
+					continue;
+
+				float[,] tile = GenerateStackedNoise(
+					tileW + blend * 2,
+					tileH + blend * 2,
+					tileSeed,
+					layerCount,
+					1.0f,
+					2.0f,
+					1.0f,
+					0.5f,
+					( x, y ) => (float)CallMethod( $"Sturnus.TerrainGenerationTool.{category}", shape, new object[] {
+					x, y,
+					tileW + blend * 2,
+					tileH + blend * 2,
+					tileSeed,
+					minHeight,
+					domainWarping,
+					domainWarpingSize,
+					domainWarpingStrength
+					} ),
+					maxHeight,
+					smoothingPasses,
+					planeScale
+				);
+
+				if ( tile is null ) continue;
+
+				// Place the tile into the result with a weighted blend on the edges.
+				// The tile is generated slightly larger than its slot (tileW + blend*2) so the
+				// overlap regions between neighbors are averaged.
+				int slotX = tx * tileW;
+				int slotY = ty * tileH;
+
+				for ( int y = 0; y < tileH + blend * 2; y++ )
+				{
+					int outY = slotY - blend + y;
+					if ( outY < 0 || outY >= height ) continue;
+
+					for ( int x = 0; x < tileW + blend * 2; x++ )
+					{
+						int outX = slotX - blend + x;
+						if ( outX < 0 || outX >= width ) continue;
+
+						// Edge weight: 1 in the core, fading to 0 across the blend band at each edge
+						float wx = EdgeBlendWeight( x, tileW + blend * 2, blend );
+						float wy = EdgeBlendWeight( y, tileH + blend * 2, blend );
+						float w = wx * wy;
+
+						result[outX, outY] += tile[x, y] * w;
+						weight[outX, outY] += w;
+					}
+				}
+			}
+		}
+
+		// Normalize by the accumulated weights
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				if ( weight[x, y] > 0.0001f )
+					result[x, y] /= weight[x, y];
+			}
+		}
+
+		return result;
+	}
+
+	/// <summary>
+	/// Generates each grid cell as its own full-resolution heightmap using that cell's own
+	/// category/shape/height/scale/seed/smoothing/noise/warp settings. No stitching - each cell
+	/// is a complete map of width x height. Rivers and staging are applied per cell.
+	/// </summary>
+	List<float[,]> BuildPerCellHeightmaps( int width, int height,
+		string[] categories, string[] shapes, long[] seeds, int[] noiseLayersArr,
+		float[] minHeights, float[] maxHeights, bool[] warpingArr, float[] warpingSizesArr,
+		float[] warpingStrengthsArr, int[] smoothingArr, float[] planeScales,
+		bool riverCarving, float riverFrequency, float riverWidth, float riverDepth,
+		float riverTurbulenceFrequency, float riverTurbulenceStrength, float minRiverSpacing,
+		bool stagingArea, int stagingAreaSize, float stagingAreaHeight, float stagingAreaX, float stagingAreaY )
+	{
+		var cells = new List<float[,]>();
+
+		int grid = Math.Max( TerrainGridSize, 1 );
+		int count = grid * grid;
+
+		for ( int index = 0; index < count; index++ )
+		{
+			string category = categories != null && index < categories.Length && !string.IsNullOrEmpty( categories[index] ) ? categories[index] : "Islands";
+			string shape = shapes != null && index < shapes.Length && !string.IsNullOrEmpty( shapes[index] ) ? shapes[index] : "Default";
+			long cellSeed = seeds != null && index < seeds.Length ? seeds[index] : 0;
+			int layerCount = noiseLayersArr != null && index < noiseLayersArr.Length ? noiseLayersArr[index] : 1;
+			float minHeight = minHeights != null && index < minHeights.Length ? minHeights[index] : 0.2f;
+			float maxHeight = maxHeights != null && index < maxHeights.Length ? maxHeights[index] : 0.5f;
+			bool domainWarping = warpingArr != null && index < warpingArr.Length ? warpingArr[index] : true;
+			float domainWarpingSize = warpingSizesArr != null && index < warpingSizesArr.Length ? warpingSizesArr[index] : 0.25f;
+			float domainWarpingStrength = warpingStrengthsArr != null && index < warpingStrengthsArr.Length ? warpingStrengthsArr[index] : 0.15f;
+			int smoothingPasses = smoothingArr != null && index < smoothingArr.Length ? smoothingArr[index] : 0;
+			float planeScale = planeScales != null && index < planeScales.Length ? planeScales[index] : 0.5f;
+
+			var fullclass = Type.GetType( $"Sturnus.TerrainGenerationTool.{category}" );
+			if ( fullclass is null || fullclass.GetMethod( shape ) is null )
+				continue;
+
+			float[,] map = GenerateStackedNoise(
+				width, height,
+				cellSeed,
+				layerCount,
+				1.0f, 2.0f, 1.0f, 0.5f,
+				( x, y ) => (float)CallMethod( $"Sturnus.TerrainGenerationTool.{category}", shape, new object[] {
+					x, y,
+					width, height,
+					cellSeed,
+					minHeight,
+					domainWarping,
+					domainWarpingSize,
+					domainWarpingStrength
+				} ),
+				maxHeight,
+				smoothingPasses,
+				planeScale
+			);
+
+			if ( map is null ) continue;
+
+			if ( riverCarving )
+			{
+				map = AddTurbulenceForRivers( map, cellSeed, riverFrequency, riverWidth, riverDepth,
+					riverTurbulenceFrequency, riverTurbulenceStrength, minRiverSpacing, 10f, 2.0f, 0.5f );
+			}
+
+			if ( stagingArea )
+			{
+				map = AddStagingSquare( map, stagingAreaSize, stagingAreaHeight, stagingAreaX, stagingAreaY );
+			}
+
+			cells.Add( map );
+		}
+
+		return cells;
+	}
+
+	/// <summary>
+	/// Generates the splatmap cache for per-cell mode - one full-res splatmap per cell using that
+	/// cell's own layer count / dispersion / blend strength.
+	/// </summary>
+	List<float[,]> BuildPerCellSplatmaps( List<float[,]> cellHeightmaps, int[] layerCounts, SplatDispersionMode[] dispersions, float[] blendStrengths )
+	{
+		var splats = new List<float[,]>();
+		if ( cellHeightmaps is null ) return splats;
+
+		for ( int i = 0; i < cellHeightmaps.Count; i++ )
+		{
+			int layers = layerCounts != null && i < layerCounts.Length ? Math.Max( layerCounts[i], 2 ) : 2;
+			var dispersion = dispersions != null && i < dispersions.Length ? dispersions[i] : SplatDispersionMode.Evenly;
+			float blend = blendStrengths != null && i < blendStrengths.Length ? blendStrengths[i] : 0.35f;
+
+			splats.Add( GenerateSplatmap( cellHeightmaps[i], MakeEvenThresholds( layers ), TerrainMaxHeight, layers, dispersion, blend ) );
+		}
+
+		return splats;
+	}
+
+	/// <summary>
+	/// Generates a splatmap where each grid tile uses its own layer count, dispersion mode and
+	/// blend strength. Each tile's splatmap is computed over its padded region (with the blend
+	/// overlap) and stitched together using the same edge weights as the heightmap.
+	/// </summary>
+	float[,] BuildTileGridSplatmap( float[,] heightmap, int gridSize, int[] layerCounts, SplatDispersionMode[] dispersions, float[] blendStrengths )
+	{
+		int width = heightmap.GetLength( 0 );
+		int height = heightmap.GetLength( 1 );
+
+		int grid = Math.Max( gridSize, 1 );
+		int tileW = width / grid;
+		int tileH = height / grid;
+
+		int maxLayers = 2;
+		if ( layerCounts != null )
+		{
+			foreach ( var lc in layerCounts )
+				maxLayers = Math.Max( maxLayers, lc );
+		}
+
+		// Single tile - same as before, just uses the tile's settings.
+		if ( grid <= 1 )
+		{
+			int layers = layerCounts != null && layerCounts.Length > 0 ? Math.Max( layerCounts[0], 2 ) : maxLayers;
+			var dispersion = dispersions != null && dispersions.Length > 0 ? dispersions[0] : SplatDispersionMode.Evenly;
+			float blendStrength = blendStrengths != null && blendStrengths.Length > 0 ? blendStrengths[0] : 0.35f;
+
+			return GenerateSplatmap( heightmap, MakeEvenThresholds( layers ), TerrainMaxHeight, layers, dispersion, blendStrength );
+		}
+
+		float[,] result = new float[width, height];
+		float[,] weight = new float[width, height];
+
+		int blend = Math.Max( 2, Math.Min( tileW, tileH ) / 8 );
+
+		for ( int ty = 0; ty < grid; ty++ )
+		{
+			for ( int tx = 0; tx < grid; tx++ )
+			{
+				int index = ty * grid + tx;
+
+				int layers = layerCounts != null && index < layerCounts.Length ? Math.Max( layerCounts[index], 2 ) : maxLayers;
+				var dispersion = dispersions != null && index < dispersions.Length ? dispersions[index] : SplatDispersionMode.Evenly;
+				float blendStrength = blendStrengths != null && index < blendStrengths.Length ? blendStrengths[index] : 0.35f;
+
+				// Extract the tile's heightmap region (with blend padding) so its splatmap
+				// normalizes against the tile's own height range.
+				int tw = tileW + blend * 2;
+				int th = tileH + blend * 2;
+				float[,] tileHeight = new float[tw, th];
+
+				int slotX = tx * tileW;
+				int slotY = ty * tileH;
+
+				for ( int y = 0; y < th; y++ )
+				{
+					int srcY = slotY - blend + y;
+					if ( srcY < 0 || srcY >= height ) continue;
+
+					for ( int x = 0; x < tw; x++ )
+					{
+						int srcX = slotX - blend + x;
+						if ( srcX < 0 || srcX >= width ) continue;
+
+						tileHeight[x, y] = heightmap[srcX, srcY];
+					}
+				}
+
+				float[,] tileSplat = GenerateSplatmap( tileHeight, MakeEvenThresholds( layers ), TerrainMaxHeight, layers, dispersion, blendStrength );
+
+				// Stitch with edge weights - same as the heightmap tiles
+				for ( int y = 0; y < th; y++ )
+				{
+					int outY = slotY - blend + y;
+					if ( outY < 0 || outY >= height ) continue;
+
+					for ( int x = 0; x < tw; x++ )
+					{
+						int outX = slotX - blend + x;
+						if ( outX < 0 || outX >= width ) continue;
+
+						float wx = EdgeBlendWeight( x, tw, blend );
+						float wy = EdgeBlendWeight( y, th, blend );
+						float w = wx * wy;
+
+						result[outX, outY] += tileSplat[x, y] * w;
+						weight[outX, outY] += w;
+					}
+				}
+			}
+		}
+
+		// Normalize by the accumulated weights
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				if ( weight[x, y] > 0.0001f )
+					result[x, y] /= weight[x, y];
+			}
+		}
+
+		return result;
+	}
+
+	/// <summary>
+	/// Builds evenly spaced color stop positions for the given layer count.
+	/// </summary>
+	float[] MakeEvenThresholds( int layers )
+	{
+		var t = new float[layers];
+		for ( int i = 0; i < layers; i++ )
+		{
+			t[i] = layers <= 1 ? 0f : (float)i / (layers - 1);
+		}
+		return t;
+	}
+
+	float EdgeBlendWeight( int coord, int size, int blend )
+	{
+		if ( blend <= 0 ) return 1f;
+		if ( coord < blend ) return (float)coord / blend;
+		if ( coord > size - blend ) return (float)(size - coord) / blend;
+		return 1f;
 	}
 
 	public void RebuildShapes()
@@ -1791,19 +2416,560 @@ public class TerrainGenerationTool : BaseWindow
 		
 	}
 
+	/// <summary>
+	/// Rebuilds the tile grid section: an "All" box plus one box per grid cell. Each box shows
+	/// which terrain category that tile currently uses and is clickable to select which tile the
+	/// Terrain Type page's category/shape selectors edit.
+	/// </summary>
+	void RebuildTileGridUI()
+	{
+		if ( _tilesContainer is null || !_tilesContainer.IsValid() ) return;
+
+		_tilesContainer.DestroyChildren();
+		_tileBoxes.Clear();
+
+		int grid = Math.Max( TerrainGridSize, 1 );
+		int count = grid * grid;
+
+		// Preserve existing selections, extend/trim to the new size
+		var oldCategories = _tileCategories;
+		var oldShapes = _tileShapes;
+		var oldMinHeights = _tileMinHeights;
+		var oldMaxHeights = _tileMaxHeights;
+		var oldPlaneScales = _tilePlaneScales;
+		var oldSeeds = _tileSeeds;
+		var oldSmoothing = _tileSmoothingPasses;
+		var oldNoiseLayers = _tileNoiseLayerStacks;
+		var oldWarping = _tileDomainWarping;
+		var oldWarpingSizes = _tileDomainWarpingSizes;
+		var oldWarpingStrengths = _tileDomainWarpingStrengths;
+		var oldSplatLayerCounts = _tileSplatLayerCounts;
+		var oldSplatMapCounts = _tileSplatMapCounts;
+		var oldSplatDispersions = _tileSplatDispersions;
+		var oldSplatBlendStrengths = _tileSplatBlendStrengths;
+
+		_tileCategories = new string[count];
+		_tileShapes = new string[count];
+		_tileMinHeights = new float[count];
+		_tileMaxHeights = new float[count];
+		_tilePlaneScales = new float[count];
+		_tileSeeds = new long[count];
+		_tileSmoothingPasses = new int[count];
+		_tileNoiseLayerStacks = new int[count];
+		_tileDomainWarping = new bool[count];
+		_tileDomainWarpingSizes = new float[count];
+		_tileDomainWarpingStrengths = new float[count];
+		_tileSplatLayerCounts = new int[count];
+		_tileSplatMapCounts = new int[count];
+		_tileSplatDispersions = new SplatDispersionMode[count];
+		_tileSplatBlendStrengths = new float[count];
+
+		string defaultCategory = TerrainCategoryArray.Count > 0 ? TerrainCategoryArray.First() : CategoryArray?.Selected;
+		string defaultShape = FirstShapeForCategory( defaultCategory );
+		if ( string.IsNullOrEmpty( defaultShape ) )
+			defaultShape = ShapeArray?.Selected;
+
+		for ( int i = 0; i < count; i++ )
+		{
+			_tileCategories[i] = oldCategories != null && i < oldCategories.Length && !string.IsNullOrEmpty( oldCategories[i] )
+				? oldCategories[i] : defaultCategory;
+			_tileShapes[i] = oldShapes != null && i < oldShapes.Length && !string.IsNullOrEmpty( oldShapes[i] )
+				? oldShapes[i] : defaultShape;
+			_tileMinHeights[i] = oldMinHeights != null && i < oldMinHeights.Length ? oldMinHeights[i] : TerrainMinHeight;
+			_tileMaxHeights[i] = oldMaxHeights != null && i < oldMaxHeights.Length ? oldMaxHeights[i] : TerrainMaxHeight;
+			_tilePlaneScales[i] = oldPlaneScales != null && i < oldPlaneScales.Length ? oldPlaneScales[i] : TerrainPlaneScale;
+			_tileSeeds[i] = oldSeeds != null && i < oldSeeds.Length ? oldSeeds[i] : TerrainSeed;
+			_tileSmoothingPasses[i] = oldSmoothing != null && i < oldSmoothing.Length ? oldSmoothing[i] : SmoothingPasses;
+			_tileNoiseLayerStacks[i] = oldNoiseLayers != null && i < oldNoiseLayers.Length ? oldNoiseLayers[i] : NoiseLayerStacks;
+			_tileDomainWarping[i] = oldWarping != null && i < oldWarping.Length ? oldWarping[i] : DomainWarping;
+			_tileDomainWarpingSizes[i] = oldWarpingSizes != null && i < oldWarpingSizes.Length ? oldWarpingSizes[i] : DomainWarpingSize;
+			_tileDomainWarpingStrengths[i] = oldWarpingStrengths != null && i < oldWarpingStrengths.Length ? oldWarpingStrengths[i] : DomainWarpingStrength;
+			_tileSplatLayerCounts[i] = oldSplatLayerCounts != null && i < oldSplatLayerCounts.Length ? oldSplatLayerCounts[i] : SplatLayerCount;
+			_tileSplatMapCounts[i] = oldSplatMapCounts != null && i < oldSplatMapCounts.Length ? oldSplatMapCounts[i] : SplatMapCount;
+			_tileSplatDispersions[i] = oldSplatDispersions != null && i < oldSplatDispersions.Length ? oldSplatDispersions[i] : SplatDispersion;
+			_tileSplatBlendStrengths[i] = oldSplatBlendStrengths != null && i < oldSplatBlendStrengths.Length ? oldSplatBlendStrengths[i] : SplatBlendStrength;
+		}
+
+		_selectedTileIndex = Math.Clamp( _selectedTileIndex, 0, count - 1 );
+
+		// "All tiles" box selects every tile at once
+		var allBox = new TileGridBox( null, -1, "All", "Select every tile" );
+		allBox.IsSelected = _selectedTileIndex < 0;
+		allBox.OnClicked = () => SelectTile( -1 );
+		_tileBoxes.Add( allBox );
+		_tilesContainer.Layout.Add( allBox );
+
+		// One box per grid cell
+		for ( int ty = 0; ty < grid; ty++ )
+		{
+			var row = _tilesContainer.Layout.AddRow();
+			row.Spacing = 4;
+
+			for ( int tx = 0; tx < grid; tx++ )
+			{
+				int index = ty * grid + tx;
+
+				var box = new TileGridBox( null, index, $"{_tileCategories[index]}:{_tileShapes[index]}", $"Tile {tx},{ty}" );
+				box.IsSelected = index == _selectedTileIndex;
+				box.OnClicked = () => SelectTile( index );
+				_tileBoxes.Add( box );
+				row.Add( box, 1 );
+			}
+		}
+
+		// Sync the category/shape selectors to whichever tile is selected
+		SyncSelectorsToSelectedTile();
+	}
+
+	/// <summary>
+	/// Marks the given tile as the one being edited. -1 selects all tiles.
+	/// </summary>
+	void SelectTile( int index )
+	{
+		if ( _selectedTileIndex == index ) return;
+
+		_selectedTileIndex = index;
+		UpdateTileBoxSelection();
+		SyncSelectorsToSelectedTile();
+
+		// Ease the overlay mesh colors so only the selected tile stays colored
+		if ( _overlayMesh != null && _overlayMesh.IsValid() )
+		{
+			_overlayColorAnimating = true;
+		}
+	}
+
+	void UpdateTileBoxSelection()
+	{
+		foreach ( var box in _tileBoxes )
+		{
+			if ( box.Index == _selectedTileIndex )
+			{
+				box.IsSelected = true;
+				box.Update();
+			}
+			else
+			{
+				box.IsSelected = false;
+				box.Update();
+			}
+		}
+	}
+
+	void UpdateTileBoxText()
+	{
+		foreach ( var box in _tileBoxes )
+		{
+			if ( box.Index < 0 ) continue;
+			if ( box.Index < _tileCategories.Length && box.Index < _tileShapes.Length )
+				box.Text = $"{_tileCategories[box.Index]}:{_tileShapes[box.Index]}";
+			box.Update();
+		}
+	}
+
+	/// <summary>
+	/// Pushes the selected tile's category/shape/height/scale/seed into the Terrain Type and
+	/// Height/Scale page controls.
+	/// </summary>
+	void SyncSelectorsToSelectedTile()
+	{
+		if ( CategoryArray is null || ShapeArray is null ) return;
+
+		_syncingTileSelectors = true;
+
+		int refIndex = Math.Max( _selectedTileIndex, 0 );
+		if ( refIndex >= _tileCategories.Length ) refIndex = 0;
+
+		string category = _tileCategories[refIndex];
+		if ( CategoryArray.HasOption( category ) )
+		{
+			CategoryArray.Selected = category;
+		}
+		else if ( CategoryArray.Children.Count() > 0 )
+		{
+			CategoryArray.SelectedIndex = 0;
+		}
+
+		string shape = _tileShapes[refIndex];
+		if ( ShapeArray.HasOption( shape ) )
+		{
+			ShapeArray.Selected = shape;
+		}
+		else if ( ShapeArray.Children.Count() > 0 )
+		{
+			ShapeArray.SelectedIndex = 0;
+		}
+
+		// Push the selected tile's height/scale/seed into the global props so the
+		// Height/Scale page sliders show the selected tile's values.
+		_serialized.GetProperty( nameof( TerrainMinHeight ) )?.SetValue( _tileMinHeights[refIndex] );
+		_serialized.GetProperty( nameof( TerrainMaxHeight ) )?.SetValue( _tileMaxHeights[refIndex] );
+		_serialized.GetProperty( nameof( TerrainPlaneScale ) )?.SetValue( _tilePlaneScales[refIndex] );
+		_serialized.GetProperty( nameof( TerrainSeed ) )?.SetValue( _tileSeeds[refIndex] );
+
+		// Same for the Smooth/Noise page controls
+		_serialized.GetProperty( nameof( SmoothingPasses ) )?.SetValue( _tileSmoothingPasses[refIndex] );
+		_serialized.GetProperty( nameof( NoiseLayerStacks ) )?.SetValue( _tileNoiseLayerStacks[refIndex] );
+
+		// Domain warping page controls
+		_serialized.GetProperty( nameof( DomainWarping ) )?.SetValue( _tileDomainWarping[refIndex] );
+		_serialized.GetProperty( nameof( DomainWarpingSize ) )?.SetValue( _tileDomainWarpingSizes[refIndex] );
+		_serialized.GetProperty( nameof( DomainWarpingStrength ) )?.SetValue( _tileDomainWarpingStrengths[refIndex] );
+
+		// Splat page controls
+		_serialized.GetProperty( nameof( SplatLayerCount ) )?.SetValue( _tileSplatLayerCounts[refIndex] );
+		_serialized.GetProperty( nameof( SplatMapCount ) )?.SetValue( _tileSplatMapCounts[refIndex] );
+		_serialized.GetProperty( nameof( SplatDispersion ) )?.SetValue( _tileSplatDispersions[refIndex] );
+		_serialized.GetProperty( nameof( SplatBlendStrength ) )?.SetValue( _tileSplatBlendStrengths[refIndex] );
+
+		_syncingTileSelectors = false;
+	}
+
+	/// <summary>
+	/// Called when the Terrain Type page's category changes. Writes the new category to the
+	/// selected tile (or every tile if All is selected).
+	/// </summary>
+	void ApplySelectedCategory()
+	{
+		if ( _syncingTileSelectors ) return;
+
+		string category = CategoryArray.Selected;
+		if ( string.IsNullOrEmpty( category ) ) return;
+
+		if ( _selectedTileIndex < 0 )
+		{
+			for ( int i = 0; i < _tileCategories.Length; i++ )
+			{
+				_tileCategories[i] = category;
+				_tileShapes[i] = FirstShapeForCategory( category );
+			}
+		}
+		else if ( _selectedTileIndex < _tileCategories.Length )
+		{
+			_tileCategories[_selectedTileIndex] = category;
+			_tileShapes[_selectedTileIndex] = FirstShapeForCategory( category );
+		}
+
+		// Keep the shape selector in sync with the new category's first shape
+		if ( ShapeArray.HasOption( _tileShapes[Math.Max( _selectedTileIndex, 0 )] ) )
+			ShapeArray.Selected = _tileShapes[Math.Max( _selectedTileIndex, 0 )];
+
+		UpdateTileBoxText();
+	}
+
+	/// <summary>
+	/// Called when the Terrain Type page's shape changes. Writes the new shape to the selected
+	/// tile (or every tile if All is selected).
+	/// </summary>
+	void ApplySelectedShape()
+	{
+		if ( _syncingTileSelectors ) return;
+
+		string shape = ShapeArray.Selected;
+		if ( string.IsNullOrEmpty( shape ) ) return;
+
+		if ( _selectedTileIndex < 0 )
+		{
+			for ( int i = 0; i < _tileShapes.Length; i++ )
+				_tileShapes[i] = shape;
+		}
+		else if ( _selectedTileIndex < _tileShapes.Length )
+		{
+			_tileShapes[_selectedTileIndex] = shape;
+		}
+
+		UpdateTileBoxText();
+	}
+
+	/// <summary>
+	/// Writes the given global height/scale/seed values into the selected tile (or every tile
+	/// if All is selected). Nullable params mean "leave unchanged".
+	/// </summary>
+	void WriteSelectedValues( float? minHeight = null, float? maxHeight = null, float? planeScale = null, long? seed = null, int? smoothing = null, int? noiseLayers = null,
+		bool? warp = null, float? warpSize = null, float? warpStrength = null,
+		int? splatLayers = null, int? splatMaps = null, SplatDispersionMode? splatDispersion = null, float? splatBlend = null )
+	{
+		if ( _selectedTileIndex < 0 )
+		{
+			for ( int i = 0; i < _tileMinHeights.Length; i++ )
+			{
+				if ( minHeight.HasValue ) _tileMinHeights[i] = minHeight.Value;
+				if ( maxHeight.HasValue ) _tileMaxHeights[i] = maxHeight.Value;
+				if ( planeScale.HasValue ) _tilePlaneScales[i] = planeScale.Value;
+				if ( seed.HasValue ) _tileSeeds[i] = seed.Value;
+				if ( smoothing.HasValue ) _tileSmoothingPasses[i] = smoothing.Value;
+				if ( noiseLayers.HasValue ) _tileNoiseLayerStacks[i] = noiseLayers.Value;
+				if ( warp.HasValue ) _tileDomainWarping[i] = warp.Value;
+				if ( warpSize.HasValue ) _tileDomainWarpingSizes[i] = warpSize.Value;
+				if ( warpStrength.HasValue ) _tileDomainWarpingStrengths[i] = warpStrength.Value;
+				if ( splatLayers.HasValue ) _tileSplatLayerCounts[i] = splatLayers.Value;
+				if ( splatMaps.HasValue ) _tileSplatMapCounts[i] = splatMaps.Value;
+				if ( splatDispersion.HasValue ) _tileSplatDispersions[i] = splatDispersion.Value;
+				if ( splatBlend.HasValue ) _tileSplatBlendStrengths[i] = splatBlend.Value;
+			}
+		}
+		else if ( _selectedTileIndex < _tileMinHeights.Length )
+		{
+			if ( minHeight.HasValue ) _tileMinHeights[_selectedTileIndex] = minHeight.Value;
+			if ( maxHeight.HasValue ) _tileMaxHeights[_selectedTileIndex] = maxHeight.Value;
+			if ( planeScale.HasValue ) _tilePlaneScales[_selectedTileIndex] = planeScale.Value;
+			if ( seed.HasValue ) _tileSeeds[_selectedTileIndex] = seed.Value;
+			if ( smoothing.HasValue ) _tileSmoothingPasses[_selectedTileIndex] = smoothing.Value;
+			if ( noiseLayers.HasValue ) _tileNoiseLayerStacks[_selectedTileIndex] = noiseLayers.Value;
+			if ( warp.HasValue ) _tileDomainWarping[_selectedTileIndex] = warp.Value;
+			if ( warpSize.HasValue ) _tileDomainWarpingSizes[_selectedTileIndex] = warpSize.Value;
+			if ( warpStrength.HasValue ) _tileDomainWarpingStrengths[_selectedTileIndex] = warpStrength.Value;
+			if ( splatLayers.HasValue ) _tileSplatLayerCounts[_selectedTileIndex] = splatLayers.Value;
+			if ( splatMaps.HasValue ) _tileSplatMapCounts[_selectedTileIndex] = splatMaps.Value;
+			if ( splatDispersion.HasValue ) _tileSplatDispersions[_selectedTileIndex] = splatDispersion.Value;
+			if ( splatBlend.HasValue ) _tileSplatBlendStrengths[_selectedTileIndex] = splatBlend.Value;
+		}
+	}
+
+	string FirstShapeForCategory( string category )
+	{
+		var options = ShapeOptionsForCategory( category );
+		return options.Length > 0 ? options[0] : null;
+	}
+
+	string[] ShapeOptionsForCategory( string category )
+	{
+		if ( string.IsNullOrEmpty( category ) ) return Array.Empty<string>();
+
+		string className = $"Sturnus.TerrainGenerationTool.{category}";
+		try
+		{
+			return GetMethodsFromClass( className );
+		}
+		catch
+		{
+			return Array.Empty<string>();
+		}
+	}
+
 	private void UpdateTerrain()
 	{
+		if ( _heightmap is null ) return;
+
 		var ActiveScene = Editor.SceneEditorSession.Active.Scene;
 		var FirstTerrain = ActiveScene.GetAllComponents<Terrain>().FirstOrDefault();
-		FirstTerrain.UpdateMaterialsBuffer();
-		FirstTerrain.SyncGPUTexture();
-		FirstTerrain.UpdateMaterialsBuffer();
-		FirstTerrain.HeightMap.Update( ConvertRawFloatArrayToByteArray( _heightmap ), 0, 0, (int)TerrainDimensionsEnum, (int)TerrainDimensionsEnum );
+		if ( !FirstTerrain.IsValid() ) return;
 
-		FirstTerrain.Storage.HeightMap = ConvertFloatArrayToUShortArray( _heightmap );
-		FirstTerrain.UpdateMaterialsBuffer();
+		int res = _heightmap.GetLength( 0 );
+
+		// Resize the scene terrain's storage to match the generated heightmap
+		if ( FirstTerrain.Storage is null )
+			FirstTerrain.Storage = new TerrainStorage { EmbeddedResource = new Sandbox.Resources.EmbeddedResource { ResourceCompiler = "embed" } };
+
+		FirstTerrain.Storage.SetResolution( res );
+
+		// Write the heightmap with the same indexing the preview uses (heightArray[y * res + x] =
+		// heightmap[x, y]). ConvertFloatArrayToUShortArray stores a transpose, which would mirror
+		// the terrain against the splatmap and misalign the materials on slopes.
+		ushort[] heightArray = new ushort[res * res];
+		for ( int y = 0; y < res; y++ )
+		{
+			for ( int x = 0; x < res; x++ )
+			{
+				float h = Math.Clamp( _heightmap[x, y], 0f, 1f );
+				heightArray[y * res + x] = (ushort)Math.Clamp( (int)(h * 65535f), 0, 65535 );
+			}
+		}
+		FirstTerrain.Storage.HeightMap = heightArray;
+
+		// Apply the splatmap as a control map so the material blending matches the generated
+		// splatmap. SetResolution wipes the control map, so we always rewrite it here. The splatmap
+		// is recomputed from the current settings so dispersion/layer changes made after Generate
+		// are honoured.
+		_splatmap = BuildTileGridSplatmap( _heightmap, TerrainGridSize,
+			(int[])_tileSplatLayerCounts.Clone(), (SplatDispersionMode[])_tileSplatDispersions.Clone(), (float[])_tileSplatBlendStrengths.Clone() );
+
+		if ( _splatmap != null )
+		{
+			// Resolve which materials to use: the assigned preview materials, else the terrain's
+			// existing materials, else fall back to loading local tmats.
+			var materials = _previewMaterials;
+			if ( materials == null || materials.Length == 0 )
+				materials = FirstTerrain.Storage.Materials?.ToArray();
+
+			if ( materials == null || materials.Length == 0 )
+				materials = LoadTerrainMaterialsSync();
+
+			if ( materials != null && materials.Length > 0 )
+			{
+				uint[] controlMap = new uint[res * res];
+				int matCount = materials.Length;
+				for ( int y = 0; y < res; y++ )
+				{
+					for ( int x = 0; x < res; x++ )
+					{
+						float layerPos = Math.Clamp( _splatmap[x, y], 0f, matCount - 1f );
+						int baseId = (int)MathF.Floor( layerPos );
+						int overlayId = Math.Min( baseId + 1, matCount - 1 );
+						byte blend = (byte)Math.Clamp( (int)((layerPos - baseId) * 255f), 0, 255 );
+						controlMap[y * res + x] = new CompactTerrainMaterial( (byte)baseId, (byte)overlayId, blend, false ).Packed;
+					}
+				}
+				FirstTerrain.Storage.ControlMap = controlMap;
+				FirstTerrain.Storage.Materials.Clear();
+				FirstTerrain.Storage.Materials.AddRange( materials );
+			}
+		}
+
+		FirstTerrain.Create();
 		FirstTerrain.SyncGPUTexture();
 		FirstTerrain.UpdateMaterialsBuffer();
+	}
+
+	/// <summary>
+	/// Synchronously loads usable local .tmat terrain materials so Apply can set the splat
+	/// control map even when the user never clicked "Randomize Materials".
+	/// </summary>
+	TerrainMaterial[] LoadTerrainMaterialsSync()
+	{
+		try
+		{
+			if ( _localTmatAssets is null || _localTmatAssets.Count == 0 )
+			{
+				var allLocal = Editor.AssetSystem.All
+					.Where( a => a is not null && !a.IsDeleted && !a.IsCloud )
+					.Where( a => (a.RelativePath?.EndsWith( ".tmat" ) ?? false) )
+					.ToList();
+				var with1k = allLocal.Where( a => a.RelativePath.Contains( "_1k" ) ).ToList();
+				_localTmatAssets = with1k.Count > 0 ? with1k : allLocal;
+			}
+
+			var pool = new List<Editor.Asset>( _localTmatAssets );
+			var materials = new List<TerrainMaterial>();
+
+			int layerCount = MaxTileSplatLayers();
+			while ( materials.Count < layerCount && pool.Count > 0 )
+			{
+				int idx = Random.Shared.Next( pool.Count );
+				var asset = pool[idx];
+				pool.RemoveAt( idx );
+
+				if ( !asset.TryLoadResource<TerrainMaterial>( out var found ) || found is null )
+					continue;
+
+				if ( !IsMaterialUsable( found, asset.Path ) )
+					continue;
+
+				materials.Add( found );
+			}
+
+			return materials.Count > 0 ? materials.ToArray() : null;
+		}
+		catch ( System.Exception e )
+		{
+			Log.Error( $"Failed to load terrain materials for apply: {e.Message}" );
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// Applies per-cell mode: spawns one Terrain per grid cell, each at full resolution and
+	/// positioned so they tile together in the scene.
+	/// </summary>
+	private void UpdatePerCellTerrains()
+	{
+		if ( _cellHeightmaps == null || _cellHeightmaps.Count == 0 ) return;
+
+		var ActiveScene = Editor.SceneEditorSession.Active.Scene;
+
+		// Match the size/height of an existing terrain in the scene so the cells line up,
+		// falling back to the preview constants if the scene has no terrain yet.
+		var existing = ActiveScene.GetAllComponents<Terrain>().FirstOrDefault();
+		float cellSize = existing.IsValid() ? existing.TerrainSize : PreviewTerrainSize;
+		float terrainHeight = existing.IsValid() ? existing.TerrainHeight : PreviewTerrainHeight;
+
+		int grid = Math.Max( TerrainGridSize, 1 );
+
+		// Terrain size is a property on the component; size each cell so the whole grid spans cellSize*grid.
+		float sizePerCell = cellSize;
+
+		int cellRes = _cellHeightmaps[0].GetLength( 0 );
+
+		// Recompute the per-cell splatmaps from the current settings so dispersion/layer changes
+		// made after Generate are honoured.
+		_cellSplatmaps = BuildPerCellSplatmaps( _cellHeightmaps,
+			(int[])_tileSplatLayerCounts.Clone(), (SplatDispersionMode[])_tileSplatDispersions.Clone(), (float[])_tileSplatBlendStrengths.Clone() );
+
+		using ( ActiveScene.Push() )
+		{
+			for ( int ty = 0; ty < grid; ty++ )
+			{
+				for ( int tx = 0; tx < grid; tx++ )
+				{
+					int index = ty * grid + tx;
+					if ( index >= _cellHeightmaps.Count ) continue;
+
+					var go = new GameObject( true, $"terrain cell {tx},{ty}" );
+					var terrain = go.AddComponent<Terrain>( false );
+
+					var storage = new TerrainStorage();
+					storage.EmbeddedResource = new Sandbox.Resources.EmbeddedResource { ResourceCompiler = "embed" };
+					storage.SetResolution( cellRes );
+					storage.TerrainSize = sizePerCell;
+					storage.TerrainHeight = terrainHeight;
+
+					// Match the preview's indexing (heightArray[y * res + x] = map[x, y]) so the
+					// heightmap and splatmap line up on slopes.
+					ushort[] cellHeight = new ushort[cellRes * cellRes];
+					var cellMap = _cellHeightmaps[index];
+					for ( int y = 0; y < cellRes; y++ )
+					{
+						for ( int x = 0; x < cellRes; x++ )
+						{
+							float h = Math.Clamp( cellMap[x, y], 0f, 1f );
+							cellHeight[y * cellRes + x] = (ushort)Math.Clamp( (int)(h * 65535f), 0, 65535 );
+						}
+					}
+					storage.HeightMap = cellHeight;
+
+					// Add the splat control map so the material blending matches the generated splatmap.
+					// These are fresh cells, so resolve materials the same way as the combined apply.
+					if ( _cellSplatmaps != null && index < _cellSplatmaps.Count )
+					{
+						var materials = _previewMaterials;
+						if ( materials == null || materials.Length == 0 )
+							materials = LoadTerrainMaterialsSync();
+
+						if ( materials != null && materials.Length > 0 )
+						{
+							uint[] controlMap = new uint[cellRes * cellRes];
+							int matCount = materials.Length;
+							var splatmap = _cellSplatmaps[index];
+							for ( int y = 0; y < cellRes; y++ )
+							{
+								for ( int x = 0; x < cellRes; x++ )
+								{
+									float layerPos = Math.Clamp( splatmap[x, y], 0f, matCount - 1f );
+									int baseId = (int)MathF.Floor( layerPos );
+									int overlayId = Math.Min( baseId + 1, matCount - 1 );
+									byte blend = (byte)Math.Clamp( (int)((layerPos - baseId) * 255f), 0, 255 );
+									controlMap[y * cellRes + x] = new CompactTerrainMaterial( (byte)baseId, (byte)overlayId, blend, false ).Packed;
+								}
+							}
+							storage.ControlMap = controlMap;
+							storage.Materials.Clear();
+							storage.Materials.AddRange( materials );
+						}
+					}
+
+					terrain.Storage = storage;
+					terrain.TerrainSize = sizePerCell;
+					terrain.TerrainHeight = terrainHeight;
+
+					// Each cell is sizePerCell wide - tile them so the whole grid spans cellSize*grid
+					go.WorldPosition = new Vector3( tx * sizePerCell, ty * sizePerCell, 0f );
+
+					terrain.Create();
+					terrain.SyncGPUTexture();
+					terrain.UpdateMaterialsBuffer();
+				}
+			}
+		}
 	}
 
 	private float[,] AddStagingSquare( float[,] heightmap, int squareSize, float squareHeight, float centerX, float centerY )
@@ -1854,18 +3020,48 @@ public class TerrainGenerationTool : BaseWindow
 		return heightmap;
 	}
 
-	private void GeneratePreviewFile( string path )
+	private void GeneratePreviewFile( string path, out SKBitmap image, out SKBitmap splat )
 	{
 		//Create TerrainGenerationTool folder if it doesn't exist.
 		Directory.CreateDirectory( path );
 		string previewfile = Path.Combine( path, $"TerrainGenerationUtility_preview.png" );
 		string splatfile = Path.Combine( path, $"TerrainGenerationUtility_splat_preview.png" );
 
-		SKBitmap image = HeightmapToBitMap( _heightmap );
+		image = HeightmapToBitMap( _heightmap );
 		SaveImage( image, previewfile );
-		//float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
-		SKBitmap splat = SplatmapToBitMap( _splatmap, _splatcolors );
+		splat = SplatmapToBitMap( _splatmap, _splatcolors );
 		SaveSplatmapAsPng( splat, splatfile );
+	}
+
+	/// <summary>
+	/// Builds a fresh GPU texture from a bitmap so the preview widgets always get new data
+	/// (the resource cache would otherwise return the same stale texture for the same path).
+	/// </summary>
+	Texture TextureFromBitmap( SKBitmap bitmap )
+	{
+		if ( bitmap is null ) return Texture.Invalid;
+
+		int width = bitmap.Width;
+		int height = bitmap.Height;
+		byte[] rgba = new byte[width * height * 4];
+
+		for ( int y = 0; y < height; y++ )
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				var c = bitmap.GetPixel( x, y );
+				int i = (y * width + x) * 4;
+				rgba[i + 0] = c.Red;
+				rgba[i + 1] = c.Green;
+				rgba[i + 2] = c.Blue;
+				rgba[i + 3] = c.Alpha;
+			}
+		}
+
+		return Texture.Create( width, height )
+			.WithName( $"TerrainGenerationPreview_{Environment.TickCount}" )
+			.WithData( rgba )
+			.Finish();
 	}
 
 	private void GenerateImageFiles( string output_path )
@@ -1891,6 +3087,13 @@ public class TerrainGenerationTool : BaseWindow
 
 		//Create TerrainGenerationTool folder if it doesn't exist.
 		Directory.CreateDirectory( output_path );
+
+		if ( GridStorage == GridStorageMode.PerCell && _cellHeightmaps != null && _cellHeightmaps.Count > 0 )
+		{
+			GeneratePerCellFiles( output_path );
+			return;
+		}
+
 		string rawfile = Path.Combine( output_path, $"TerrainGenerationUtility_export_{/*TerrainShapeEnumSelect*/null}{UsingDomainWarping}{UsingErosionEmulation}{UsingWaterCarving}.raw" );
 		string previewfile = Path.Combine( output_path, $"TerrainGenerationUtility_preview_{/*TerrainShapeEnumSelect*/null}{UsingDomainWarping}{UsingErosionEmulation}{UsingWaterCarving}.png" );
 		string splatfile = Path.Combine( output_path, $"TerrainGenerationUtility_splat_export_{/*TerrainShapeEnumSelect*/null}{UsingDomainWarping}{UsingErosionEmulation}{UsingWaterCarving}.png" );
@@ -1903,14 +3106,15 @@ public class TerrainGenerationTool : BaseWindow
 		SaveImage( image, previewfile );
 		Log.Info( $"HeightMap preview file generated! - {previewfile}" );
 		//Generate & Export SplatMap image
-		float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+		float[,] splatmap = BuildTileGridSplatmap( _heightmap, TerrainGridSize,
+			(int[])_tileSplatLayerCounts.Clone(), (SplatDispersionMode[])_tileSplatDispersions.Clone(), (float[])_tileSplatBlendStrengths.Clone() );
 		SKBitmap splat = SplatmapToBitMap( splatmap, _splatcolors );
 		SaveSplatmapAsPng( splat, splatfile );
 		Log.Info( $"Splatmap file generated! - {splatfile}" );
 
-		// Split the layers across the requested number of splat maps
-		int layerCount = Math.Max( SplatLayerCount, 2 );
-		int mapCount = Math.Max( SplatMapCount, 1 );
+		// Split the layers across the requested number of splat maps (based on the first tile's settings)
+		int layerCount = _tileSplatLayerCounts != null && _tileSplatLayerCounts.Length > 0 ? Math.Max( _tileSplatLayerCounts[0], 2 ) : 2;
+		int mapCount = _tileSplatMapCounts != null && _tileSplatMapCounts.Length > 0 ? Math.Max( _tileSplatMapCounts[0], 1 ) : 1;
 		for ( int m = 0; m < mapCount; m++ )
 		{
 			int startLayer = m * layerCount / mapCount;
@@ -1944,6 +3148,47 @@ public class TerrainGenerationTool : BaseWindow
 		}
 
 		Log.Info( $"All export files saved! {output_path}" );
+	}
+
+	/// <summary>
+	/// Exports each grid cell as its own full-resolution .raw heightmap and .png splatmap,
+	/// named by grid coordinate.
+	/// </summary>
+	private void GeneratePerCellFiles( string output_path )
+	{
+		Directory.CreateDirectory( output_path );
+
+		int grid = Math.Max( TerrainGridSize, 1 );
+
+		for ( int ty = 0; ty < grid; ty++ )
+		{
+			for ( int tx = 0; tx < grid; tx++ )
+			{
+				int index = ty * grid + tx;
+				if ( index >= _cellHeightmaps.Count ) continue;
+
+				var heightmap = _cellHeightmaps[index];
+
+				string rawfile = Path.Combine( output_path, $"TerrainGenerationUtility_cell_{tx}_{ty}.raw" );
+				SaveRaw( heightmap, rawfile );
+				Log.Info( $"Cell {tx},{ty} raw file generated! - {rawfile}" );
+
+				SKBitmap image = HeightmapToBitMap( heightmap );
+				string previewfile = Path.Combine( output_path, $"TerrainGenerationUtility_cell_{tx}_{ty}_preview.png" );
+				SaveImage( image, previewfile );
+				Log.Info( $"Cell {tx},{ty} preview generated! - {previewfile}" );
+
+				if ( _cellSplatmaps != null && index < _cellSplatmaps.Count )
+				{
+					SKBitmap splat = SplatmapToBitMap( _cellSplatmaps[index], _splatcolors );
+					string splatfile = Path.Combine( output_path, $"TerrainGenerationUtility_cell_{tx}_{ty}_splat.png" );
+					SaveSplatmapAsPng( splat, splatfile );
+					Log.Info( $"Cell {tx},{ty} splatmap generated! - {splatfile}" );
+				}
+			}
+		}
+
+		Log.Info( $"All per-cell export files saved! {output_path}" );
 	}
 
 	public float[,] GenerateHeightmap( int width, int height, Func<int, int, float> generator, float maxHeight, int smoothpasses )
@@ -3010,6 +4255,144 @@ public class WrapOption : Widget
 		var textRect = new Rect( rect.Left + 2, rect.Top + rect.Height * 0.55f, rect.Width - 4, rect.Height * 0.45f );
 		Paint.SetDefaultFont( 7 );
 		Paint.DrawText( textRect, Text, TextFlag.Center | TextFlag.WordWrap );
+	}
+}
+
+/// <summary>
+/// A clickable box representing one terrain grid cell (or the "All" box). Shows the tile's
+/// current category name and is highlighted when selected.
+/// </summary>
+public class TileGridBox : Widget
+{
+	public int Index { get; }
+	public string Text { get; set; }
+	string _subtitle;
+	public bool IsSelected { get; set; }
+	public Action OnClicked { get; set; }
+
+	public TileGridBox( Widget parent, int index, string text, string subtitle = null ) : base( parent )
+	{
+		Index = index;
+		Text = text;
+		_subtitle = subtitle;
+		Cursor = CursorShape.Finger;
+		ToolTip = subtitle ?? text;
+		MinimumSize = new Vector2( 44, 40 );
+		MouseLeftPress = () => OnClicked?.Invoke();
+	}
+
+	protected override Vector2 SizeHint()
+	{
+		return new Vector2( 48, 44 );
+	}
+
+	protected override void OnPaint()
+	{
+		base.OnPaint();
+
+		Paint.Antialiasing = true;
+		Paint.ClearPen();
+
+		var rect = LocalRect;
+		var bg = IsSelected ? Theme.Primary.WithAlpha( 0.3f ) : Theme.ControlBackground.WithAlpha( 0.6f );
+		if ( Paint.HasMouseOver ) bg = bg.Lighten( 0.1f );
+		Paint.SetBrush( bg );
+		Paint.DrawRect( rect, Theme.ControlRadius );
+
+		if ( IsSelected )
+		{
+			Paint.SetPen( Theme.Primary, 2 );
+			Paint.DrawRect( rect, Theme.ControlRadius );
+		}
+
+		var textRect = new Rect( rect.Left + 3, rect.Top + 2, rect.Width - 6, rect.Height - 4 );
+
+		Paint.SetDefaultFont( 7 );
+		Paint.SetPen( IsSelected ? Theme.Primary : Theme.Text.WithAlpha( 0.9f ) );
+		Paint.DrawText( textRect, Text ?? "?", TextFlag.Center | TextFlag.WordWrap );
+	}
+}
+
+/// <summary>
+/// A compact dropdown-style picker used in the tile grid. Shows a button with the current value
+/// and opens a popup listing the available options.
+/// </summary>
+public class TileDropdownPicker : Widget
+{
+	string[] _options;
+	Button _button;
+	string _label;
+
+	public string Selected { get; private set; }
+	public Action<string> OnPicked { get; set; }
+
+	public TileDropdownPicker( Widget parent, string label, string[] options ) : base( parent )
+	{
+		_label = label;
+		_options = options ?? Array.Empty<string>();
+
+		Layout = Layout.Column();
+		Layout.Spacing = 2;
+
+		var labelWidget = new Label( label );
+		labelWidget.SetStyles( "font-size: 9px; color: #999;" );
+		Layout.Add( labelWidget );
+
+		_button = new Button( Selected ?? "None", this );
+		_button.FixedHeight = Theme.RowHeight;
+		_button.Clicked += OpenMenu;
+		Layout.Add( _button );
+	}
+
+	public void SetOptions( string[] options )
+	{
+		_options = options ?? Array.Empty<string>();
+	}
+
+	public void SetSelected( string value )
+	{
+		Selected = value;
+		if ( _button != null && _button.IsValid() )
+			_button.Text = value ?? "None";
+	}
+
+	void OpenMenu()
+	{
+		var popup = new PopupWidget( null );
+		popup.Layout = Layout.Column();
+		popup.Layout.Margin = 4;
+		popup.Width = Math.Max( 180, _button.ScreenRect.Width );
+
+		var scroller = popup.Layout.Add( new ScrollArea( this ), 1 );
+		scroller.Canvas = new Widget( scroller )
+		{
+			Layout = Layout.Column(),
+			VerticalSizeMode = SizeMode.CanGrow | SizeMode.Expand
+		};
+
+		foreach ( var option in _options )
+		{
+			var item = scroller.Canvas.Layout.Add( new Button( option ) );
+			item.MouseLeftPress = () =>
+			{
+				SetSelected( option );
+				OnPicked?.Invoke( option );
+				popup.Close();
+			};
+		}
+
+		popup.Position = _button.ScreenRect.BottomLeft;
+		popup.Visible = true;
+		popup.AdjustSize();
+		popup.ConstrainToScreen();
+	}
+
+	protected override void OnPaint()
+	{
+		Paint.ClearPen();
+		Paint.SetBrush( Theme.ControlBackground );
+		Paint.DrawRect( LocalRect, Theme.ControlRadius );
+		base.OnPaint();
 	}
 }
 
