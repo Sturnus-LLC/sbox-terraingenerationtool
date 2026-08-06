@@ -121,6 +121,20 @@ public class TerrainGenerationTool : BaseWindow
 	TerrainStorage _previewStorage;
 	GameObject _splatOverlayGO;
 	ModelRenderer _splatOverlayRenderer;
+	Mesh _overlayMesh;
+	float[] _overlayTargetHeights;
+	float[] _overlayCurrentHeights;
+	Color32[] _overlayCurrentColors;
+	float[,] _overlaySplatmap;
+	bool _overlayUseSplatColors;
+	bool _overlayAnimating;
+	List<Color> _splatColorCache = new();
+	List<float> _currentFrameTimes;
+	List<float> _targetFrameTimes;
+	bool _gradientAnimating;
+	bool _isAnimatingGradient;
+	const float PreviewMorphSpeed = 8f;
+	const float MeshMorphSpeed = PreviewMorphSpeed * 0.25f;
 	float _orbitDistance = 20000f;
 	float _orbitAngle = 0f;
 	float _orbitPitch = 30f;
@@ -147,6 +161,7 @@ public class TerrainGenerationTool : BaseWindow
 	string _activePropsTab;
 	Button _randomizeMaterialsButton;
 	Label _materialLoadingLabel;
+	GradientControlWidget _gradientControlWidget;
 
 	WrapSelector ShapeArray;
 	WrapSelector CategoryArray;
@@ -434,7 +449,8 @@ public class TerrainGenerationTool : BaseWindow
 		splatPage.Layout.Add( new Label( "Blend Strength" ) );
 		splatPage.Layout.Add( FloatSlider( nameof( SplatBlendStrength ) ) );
 		splatPage.Layout.Add( new Label( "Splatmap Colors/Threshold" ) );
-		splatPage.Layout.Add( new GradientControlWidget( _serialized.GetProperty( nameof( SplatMapGradient ) ) ) );
+		_gradientControlWidget = new GradientControlWidget( _serialized.GetProperty( nameof( SplatMapGradient ) ) );
+		splatPage.Layout.Add( _gradientControlWidget );
 		splatPage.Layout.Add( new Label( "Preview Materials" ) );
 		splatPage.Layout.Add( new BoolControlWidget( _serialized.GetProperty( nameof( PreviewSplatMaterials ) ) ) );
 		var materialHint = new Label( "Assigns random local .tmat terrain materials from your project's assets to the splat layers so you can preview the material blending on the terrain." );
@@ -699,7 +715,9 @@ public class TerrainGenerationTool : BaseWindow
 
 	void OnSerializedPropertyChanged( SerializedProperty prop )
 	{
-		_previewDirty = true;
+		// Intermediate frames written during gradient animation shouldn't retrigger a regen
+		if ( !_isAnimatingGradient )
+			_previewDirty = true;
 
 		if ( prop is null ) return;
 
@@ -741,25 +759,18 @@ public class TerrainGenerationTool : BaseWindow
 	{
 		int layerCount = Math.Max( SplatLayerCount, 2 );
 
-		// Keep the user's existing color stops, trim or extend to the requested layer count.
-		var existing = SplatMapGradient.Colors.ToList();
-
-		var colors = new List<Color>();
-		for ( int i = 0; i < layerCount; i++ )
+		// Seed the persistent color cache from the current gradient first so user edits are kept.
+		if ( _splatColorCache.Count == 0 && SplatMapGradient.Colors != null && SplatMapGradient.Colors.Count() > 0 )
 		{
-			if ( i < existing.Count )
-			{
-				colors.Add( existing[i].Value );
-			}
-			else
-			{
-				// New layers get a random bright color
-				colors.Add( RandomBrightColor() );
-			}
+			foreach ( var frame in SplatMapGradient.Colors )
+				_splatColorCache.Add( frame.Value );
 		}
 
-		// Position the color stops according to the dispersion mode so the gradient
-		// visually reflects how the layers are spread across the height range.
+		// Add new colors to the end as layers grow - existing colors keep their index.
+		while ( _splatColorCache.Count < layerCount )
+			_splatColorCache.Add( RandomBrightColor() );
+
+		// Compute the target stop positions.
 		float[] thresholds;
 		var source = _previewHeightmap ?? _heightmap;
 		if ( SplatDispersion == SplatDispersionMode.Natural && source != null )
@@ -776,16 +787,114 @@ public class TerrainGenerationTool : BaseWindow
 		}
 		_splatthresholds = thresholds;
 
-		var frames = new Gradient.ColorFrame[layerCount];
-		for ( int i = 0; i < layerCount; i++ )
+		// First build: set the gradient directly.
+		if ( _currentFrameTimes is null )
 		{
-			frames[i] = new Gradient.ColorFrame( thresholds[i], colors[i] );
+			_currentFrameTimes = thresholds.ToList();
+			_targetFrameTimes = thresholds.ToList();
+			ApplyGradientFromFrames();
+			return;
 		}
 
-		SplatMapGradient = new Gradient( frames );
+		int oldCount = _currentFrameTimes.Count;
+
+		// New frames (added layers) enter from the right and slide left to their target.
+		if ( layerCount > oldCount )
+		{
+			for ( int i = oldCount; i < layerCount; i++ )
+				_currentFrameTimes.Add( 1f );
+			_targetFrameTimes = thresholds.ToList();
+		}
+		// Removed frames slide out to the right (target 1.0) and get dropped when they arrive.
+		else if ( layerCount < oldCount )
+		{
+			// Existing frames keep their current positions; the extra ones head right.
+			var newTargets = thresholds.ToList();
+			while ( newTargets.Count < oldCount )
+				newTargets.Add( 1f );
+			_targetFrameTimes = newTargets;
+		}
+		// Same count - just retarget the existing frames.
+		else
+		{
+			_targetFrameTimes = thresholds.ToList();
+		}
+
+		_gradientAnimating = true;
+	}
+
+	void ApplyGradientFromFrames()
+	{
+		// Only include frames that are still "in play" (haven't slid off the right edge yet).
+		var frames = new List<Gradient.ColorFrame>();
+		for ( int i = 0; i < _currentFrameTimes.Count && i < _splatColorCache.Count; i++ )
+		{
+			float t = Math.Clamp( _currentFrameTimes[i], 0f, 1f );
+			frames.Add( new Gradient.ColorFrame( t, _splatColorCache[i] ) );
+		}
+
+		SplatMapGradient = new Gradient( frames.ToArray() );
 		SplatMapGradient.Blending = Gradient.BlendMode.Stepped;
 
-		_serialized.GetProperty( nameof( SplatMapGradient ) )?.SetValue( SplatMapGradient );
+		_isAnimatingGradient = true;
+		try
+		{
+			_serialized.GetProperty( nameof( SplatMapGradient ) )?.SetValue( SplatMapGradient );
+		}
+		finally
+		{
+			_isAnimatingGradient = false;
+		}
+	}
+
+	/// <summary>
+	/// Eases the gradient color stops toward their target positions so palette changes
+	/// slide in/out on the scale instead of snapping.
+	/// </summary>
+	void UpdateGradientAnimation()
+	{
+		if ( !_gradientAnimating || _currentFrameTimes is null || _targetFrameTimes is null ) return;
+
+		float t = 1f - MathF.Exp( -PreviewMorphSpeed * RealTime.Delta );
+
+		float maxDelta = 0f;
+		for ( int i = 0; i < _currentFrameTimes.Count && i < _targetFrameTimes.Count; i++ )
+		{
+			float delta = _targetFrameTimes[i] - _currentFrameTimes[i];
+			_currentFrameTimes[i] += delta * t;
+			maxDelta = MathF.Max( maxDelta, MathF.Abs( delta ) );
+		}
+
+		// Drop frames that have slid off the right edge (removed layers)
+		if ( _currentFrameTimes.Count > _targetFrameTimes.Count )
+		{
+			while ( _currentFrameTimes.Count > _targetFrameTimes.Count )
+			{
+				int last = _currentFrameTimes.Count - 1;
+				if ( _currentFrameTimes[last] >= 0.999f )
+				{
+					_currentFrameTimes.RemoveAt( last );
+					if ( _splatColorCache.Count > _targetFrameTimes.Count )
+						_splatColorCache.RemoveAt( _splatColorCache.Count - 1 );
+				}
+				else break;
+			}
+		}
+
+		ApplyGradientFromFrames();
+
+		// Force the gradient widget to repaint this frame so the motion is smooth
+		if ( _gradientControlWidget != null && _gradientControlWidget.IsValid() )
+			_gradientControlWidget.Update();
+
+		// The overlay mesh samples the live gradient, so rebuild it while the palette animates
+		BuildOverlayMesh();
+
+		if ( maxDelta < 0.001f )
+		{
+			_currentFrameTimes = _targetFrameTimes.ToList();
+			_gradientAnimating = false;
+		}
 	}
 
 	static Color RandomBrightColor()
@@ -1059,6 +1168,12 @@ public class TerrainGenerationTool : BaseWindow
 		// Tick the preview scene so the terrain clipmap builds and updates
 		if ( RenderCanvas != null && RenderCanvas.Scene.IsValid() )
 			RenderCanvas.Scene.EditorTick( RealTime.Now, RealTime.Delta );
+
+		// Morph the overlay mesh toward its target shape every frame
+		UpdateOverlayAnimation();
+
+		// Animate the gradient color stops sliding in/out
+		UpdateGradientAnimation();
 
 		if ( !_previewDirty ) return;
 		if ( RealTime.Now - _lastPreviewRegen < 0.1f ) return;
@@ -1344,90 +1459,199 @@ public class TerrainGenerationTool : BaseWindow
 	{
 		if ( _splatOverlayRenderer is null || !_splatOverlayRenderer.IsValid() ) return;
 
-		// Always rebuild the mesh so the heightmap/colors stay in sync even while hidden.
 		int res = heightmap.GetLength( 0 );
+
+		// Store the target heightmap and the desired colors. The mesh itself is animated
+		// toward this target in FrameUpdate so changes morph smoothly instead of snapping.
+		if ( _overlayTargetHeights == null || _overlayTargetHeights.Length != res * res )
+		{
+			_overlayTargetHeights = new float[res * res];
+			_overlayCurrentHeights = new float[res * res];
+		}
+
+		bool first = _splatOverlayRenderer.Model is null;
+
+		for ( int y = 0; y < res; y++ )
+		{
+			for ( int x = 0; x < res; x++ )
+			{
+				_overlayTargetHeights[y * res + x] = Math.Clamp( heightmap[x, y], 0f, 1f );
+			}
+		}
+
+		// If we've never built the mesh, snap to the current values so the first frame is correct.
+		if ( first )
+		{
+			Array.Copy( _overlayTargetHeights, _overlayCurrentHeights, _overlayTargetHeights.Length );
+			_overlayAnimating = false;
+		}
+		else
+		{
+			_overlayAnimating = true;
+		}
+
+		// Cache the splatmap (only changes when the heightmap regenerates). The vertex colors
+		// are evaluated from the LIVE gradient each frame so they stay in sync with the widget.
+		_overlayUseSplatColors = splatColors;
+		if ( splatColors )
+			_overlaySplatmap = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+
+		if ( first )
+			BuildOverlayMesh();
+
+		// Toggle visibility
+		if ( _splatOverlayGO != null ) _splatOverlayGO.Enabled = visible;
+	}
+
+	/// <summary>
+	/// Called every frame - eases the overlay mesh from its current shape toward the target shape.
+	/// </summary>
+	void UpdateOverlayAnimation()
+	{
+		if ( _splatOverlayRenderer is null || !_splatOverlayRenderer.IsValid() ) return;
+		if ( !_overlayAnimating || _overlayTargetHeights is null || _overlayCurrentHeights is null ) return;
+
+		int count = _overlayTargetHeights.Length;
+		if ( _overlayCurrentHeights.Length != count ) return;
+
+		// Exponential approach - fast at first, settles smoothly
+		float t = 1f - MathF.Exp( -PreviewMorphSpeed * RealTime.Delta );
+
+		float maxDelta = 0f;
+		for ( int i = 0; i < count; i++ )
+		{
+			float delta = _overlayTargetHeights[i] - _overlayCurrentHeights[i];
+			_overlayCurrentHeights[i] += delta * t;
+			maxDelta = MathF.Max( maxDelta, MathF.Abs( delta ) );
+		}
+
+		// Rebuild the mesh from the current (eased) heights. Colors are sampled from the
+		// live gradient inside BuildOverlayMesh so they animate as smoothly as the widget.
+		BuildOverlayMesh();
+
+		// Stop once we're close enough
+		if ( maxDelta < 0.001f )
+		{
+			Array.Copy( _overlayTargetHeights, _overlayCurrentHeights, count );
+			_overlayAnimating = false;
+		}
+	}
+
+	void BuildOverlayMesh()
+	{
+		if ( _splatOverlayRenderer is null || !_splatOverlayRenderer.IsValid() ) return;
+		if ( _overlayCurrentHeights is null ) return;
+
+		int res = (int)MathF.Sqrt( _overlayCurrentHeights.Length );
+		int vertexCount = res * res;
 
 		const float worldSize = PreviewTerrainSize;
 		const float worldHeight = PreviewTerrainHeight;
 		float cellX = worldSize / res;
 		float cellY = worldSize / res;
 
-		float[,] splatmap = null;
-		if ( splatColors )
-			splatmap = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+		// Color ease factor - the mesh morphs at half the gradient speed so the color
+		// swipe across the terrain is smoother. First build snaps immediately.
+		float colorT = _overlayCurrentColors is null ? 1f : 1f - MathF.Exp( -MeshMorphSpeed * RealTime.Delta );
 
-		var vertices = new Vertex[res * res];
-		var indices = new List<int>();
+		var vertices = new Vertex[vertexCount];
+		var colors = _overlayCurrentColors ?? new Color32[vertexCount];
+
+		bool useSplat = _overlayUseSplatColors && _overlaySplatmap != null;
 
 		Parallel.For( 0, res, y =>
 		{
 			for ( int x = 0; x < res; x++ )
 			{
-				float h = Math.Clamp( heightmap[x, y], 0f, 1f );
+				int index = y * res + x;
+				float h = _overlayCurrentHeights[index];
 
 				// Local space - the overlay GO is parented to the centered terrain GO
 				Vector3 position = new Vector3( x * cellX, y * cellY, h * worldHeight );
 
-				float hL = heightmap[Math.Max( x - 1, 0 ), y];
-				float hR = heightmap[Math.Min( x + 1, res - 1 ), y];
-				float hD = heightmap[x, Math.Max( y - 1, 0 )];
-				float hU = heightmap[x, Math.Min( y + 1, res - 1 )];
+				float hL = _overlayCurrentHeights[y * res + Math.Max( x - 1, 0 )];
+				float hR = _overlayCurrentHeights[y * res + Math.Min( x + 1, res - 1 )];
+				float hD = _overlayCurrentHeights[Math.Max( y - 1, 0 ) * res + x];
+				float hU = _overlayCurrentHeights[Math.Min( y + 1, res - 1 ) * res + x];
 
 				float dx = (hR - hL) * worldHeight / (2.0f * cellX);
 				float dy = (hU - hD) * worldHeight / (2.0f * cellY);
 
 				Vector3 normal = new Vector3( -dx, -dy, 1.0f ).Normal;
 
-				Color color;
-				if ( splatColors && splatmap != null )
+				// Sample the target color from the LIVE gradient each frame, then ease the
+				// mesh color toward it so the swipe lags behind the widget and looks smooth.
+				Color targetColor;
+				if ( useSplat )
 				{
-					float layerPos = Math.Clamp( splatmap[x, y], 0f, SplatLayerCount - 1f );
+					float layerPos = Math.Clamp( _overlaySplatmap[x, y], 0f, SplatLayerCount - 1f );
 					int layer0 = (int)MathF.Floor( layerPos );
 					int layer1 = Math.Min( layer0 + 1, SplatLayerCount - 1 );
 					float t = layerPos - layer0;
 
 					Color c0 = SplatMapGradient.Evaluate( Math.Clamp( layer0 / (float)Math.Max( SplatLayerCount - 1, 1 ), 0f, 1f ) );
 					Color c1 = SplatMapGradient.Evaluate( Math.Clamp( layer1 / (float)Math.Max( SplatLayerCount - 1, 1 ), 0f, 1f ) );
-					color = Color.Lerp( c0, c1, t );
+					targetColor = Color.Lerp( c0, c1, t );
 				}
 				else
 				{
 					// The original height-based material color we painted on the mesh
-					color = Color.Lerp( Color.FromBytes( 60, 90, 40 ), Color.FromBytes( 200, 185, 150 ), h );
+					targetColor = Color.Lerp( Color.FromBytes( 60, 90, 40 ), Color.FromBytes( 200, 185, 150 ), h );
 				}
 
-				vertices[x + y * res] = new Vertex( position, normal, normal, new Vector4( 0, 0, 0, 1 ) );
-				vertices[x + y * res].Color = color.ToColor32();
+				var target32 = targetColor.ToColor32();
+				var current = colors[index];
+
+				byte r = (byte)MathX.LerpTo( current.r, target32.r, colorT );
+				byte g = (byte)MathX.LerpTo( current.g, target32.g, colorT );
+				byte b = (byte)MathX.LerpTo( current.b, target32.b, colorT );
+				byte a = (byte)MathX.LerpTo( current.a, target32.a, colorT );
+				colors[index] = new Color32( r, g, b, a );
+
+				vertices[index] = new Vertex( position, normal, normal, new Vector4( 0, 0, 0, 1 ) );
+				vertices[index].Color = colors[index];
 			}
 		} );
 
-		for ( int y = 0; y < res - 1; y++ )
-		{
-			for ( int x = 0; x < res - 1; x++ )
-			{
-				int a = x + y * res;
-				int b = (x + 1) + y * res;
-				int c = (x + 1) + (y + 1) * res;
-				int d = x + (y + 1) * res;
+		_overlayCurrentColors = colors;
 
-				indices.Add( a );
-				indices.Add( b );
-				indices.Add( c );
-				indices.Add( a );
-				indices.Add( c );
-				indices.Add( d );
+		// Build indices once - the grid topology never changes
+		var indices = new List<int>();
+		if ( _overlayMesh is null )
+		{
+			for ( int y = 0; y < res - 1; y++ )
+			{
+				for ( int x = 0; x < res - 1; x++ )
+				{
+					int a = x + y * res;
+					int b = (x + 1) + y * res;
+					int c = (x + 1) + (y + 1) * res;
+					int d = x + (y + 1) * res;
+
+					indices.Add( a );
+					indices.Add( b );
+					indices.Add( c );
+					indices.Add( a );
+					indices.Add( c );
+					indices.Add( d );
+				}
 			}
 		}
 
-		var mesh = new Mesh( _splatOverlayRenderer.MaterialOverride );
-		mesh.CreateVertexBuffer( vertices.Length, vertices );
-		mesh.CreateIndexBuffer( indices.Count, indices );
-		mesh.Bounds = BBox.FromPositionAndSize( new Vector3( worldSize * 0.5f, worldSize * 0.5f, worldHeight * 0.5f ), new Vector3( worldSize, worldSize, worldHeight ) );
+		if ( _overlayMesh is null || !_overlayMesh.IsValid() )
+		{
+			_overlayMesh = new Mesh( _splatOverlayRenderer.MaterialOverride );
+			_overlayMesh.CreateVertexBuffer( vertices.Length, vertices );
+			_overlayMesh.CreateIndexBuffer( indices.Count, indices );
+			_overlayMesh.Bounds = BBox.FromPositionAndSize( new Vector3( worldSize * 0.5f, worldSize * 0.5f, worldHeight * 0.5f ), new Vector3( worldSize, worldSize, worldHeight ) );
 
-		_splatOverlayRenderer.Model = Model.Builder.AddMesh( mesh ).Create();
-
-		// Toggle visibility after the rebuild
-		if ( _splatOverlayGO != null ) _splatOverlayGO.Enabled = visible;
+			_splatOverlayRenderer.Model = Model.Builder.AddMesh( _overlayMesh ).Create();
+		}
+		else
+		{
+			// Update the existing vertex buffer in place - much faster than rebuilding the model
+			_overlayMesh.SetVertexBufferData( vertices );
+		}
 	}
 
 	float[,] BuildHeightmap( int width, int height,
