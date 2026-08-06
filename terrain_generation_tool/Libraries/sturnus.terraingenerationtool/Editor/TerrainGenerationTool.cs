@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Drawing;
@@ -105,13 +105,8 @@ public class TerrainGenerationTool : BaseWindow
 	float[,] _previewHeightmap;
 
 	TerrainMaterial[] _previewMaterials;
-	Texture[] _previewMaterialAlbedo;
-	Color32[][] _previewMaterialPixels;
-	int[] _previewMaterialWidths;
-	int[] _previewMaterialHeights;
-	float[] _previewMaterialUvScales;
 	int _previewMaterialsGeneration = 0;
-	List<string> _facepunchTmatIdents;
+	List<Editor.Asset> _localTmatAssets;
 
 	Texture _preview_image_texture;
 	Editor.TextureWidget PreviewImage;
@@ -122,14 +117,19 @@ public class TerrainGenerationTool : BaseWindow
 	CameraComponent Camera;
 	Gizmo.Instance GizmoInstance;
 	GameObject _previewGO;
-	ModelRenderer _previewRenderer;
-	float _orbitDistance = 4200f;
+	Terrain _previewTerrain;
+	TerrainStorage _previewStorage;
+	GameObject _splatOverlayGO;
+	ModelRenderer _splatOverlayRenderer;
+	float _orbitDistance = 20000f;
 	float _orbitAngle = 0f;
 	float _orbitPitch = 30f;
 	bool _autoSpin = true;
 	FloatSlider ZoomSlider;
 	const float SpinSpeed = 8f; // degrees per second
 	const int PreviewResolution = 512;
+	const float PreviewTerrainSize = 20000f;
+	const float PreviewTerrainHeight = 5000f;
 
 	SerializedObject _serialized;
 	bool _previewDirty;
@@ -437,8 +437,10 @@ public class TerrainGenerationTool : BaseWindow
 		splatPage.Layout.Add( new GradientControlWidget( _serialized.GetProperty( nameof( SplatMapGradient ) ) ) );
 		splatPage.Layout.Add( new Label( "Preview Materials" ) );
 		splatPage.Layout.Add( new BoolControlWidget( _serialized.GetProperty( nameof( PreviewSplatMaterials ) ) ) );
-		var materialHint = new Label( "Assigns random facepunch cloud materials to the splat layers so you can preview the material blending on the terrain." );
+		var materialHint = new Label( "Assigns random local .tmat terrain materials from your project's assets to the splat layers so you can preview the material blending on the terrain." );
 		materialHint.SetStyles( "font-size: 10px; color: #888;" );
+		materialHint.WordWrap = true;
+		materialHint.MaximumWidth = 260;
 		splatPage.Layout.Add( materialHint );
 		var randomizeRow = splatPage.Layout.AddRow();
 		_randomizeMaterialsButton = randomizeRow.Add( new Button( "Randomize Materials", "casino" ) );
@@ -446,6 +448,8 @@ public class TerrainGenerationTool : BaseWindow
 		_materialLoadingLabel = randomizeRow.Add( new Label( "Loading..." ) );
 		_materialLoadingLabel.SetStyles( "font-size: 10px; color: #888;" );
 		_materialLoadingLabel.Visible = false;
+		_materialLoadingLabel.WordWrap = true;
+		_materialLoadingLabel.MaximumWidth = 120;
 		AddPropsTab( "Splat", "palette", splatPage, "Splatmap layers, maps, colors and dispersion" );
 
 		// --- Warping tab ---
@@ -645,12 +649,32 @@ public class TerrainGenerationTool : BaseWindow
 
 		GizmoInstance = RenderCanvas.GizmoInstance;
 
-		// Create the preview terrain renderer
+		// Create the preview terrain - a real Terrain component in the preview scene
 		using ( RenderCanvas.Scene.Push() )
 		{
 			_previewGO = new GameObject( true, "terrain preview" );
-			_previewRenderer = _previewGO.AddComponent<ModelRenderer>();
-			_previewRenderer.MaterialOverride = Material.Load( "materials/default/vertex_color.vmat" );
+			_previewTerrain = _previewGO.AddComponent<Terrain>( false );
+			_previewStorage = new TerrainStorage();
+			_previewStorage.EmbeddedResource = new Sandbox.Resources.EmbeddedResource { ResourceCompiler = "embed" };
+			_previewStorage.SetResolution( PreviewResolution );
+			_previewStorage.TerrainSize = PreviewTerrainSize;
+			_previewStorage.TerrainHeight = PreviewTerrainHeight;
+			_previewTerrain.Storage = _previewStorage;
+			_previewTerrain.TerrainSize = PreviewTerrainSize;
+			_previewTerrain.TerrainHeight = PreviewTerrainHeight;
+			// Terrain spans [0, TerrainSize] from its origin - shift it so it's centered on the origin
+			_previewGO.WorldPosition = new Vector3( -PreviewTerrainSize * 0.5f, -PreviewTerrainSize * 0.5f, 0f );
+			_previewTerrain.Enabled = true;
+
+			// Overlay mesh that shows the splatmap colors when the material preview is off.
+			// Slightly offset above the terrain so it doesn't z-fight with the terrain surface.
+			// Parented to the terrain GO (which is centered at origin), so the mesh uses local coords.
+			_splatOverlayGO = new GameObject( true, "splat overlay" );
+			_splatOverlayGO.Parent = _previewGO;
+			_splatOverlayGO.LocalPosition = new Vector3( 0, 0, 1f );
+			_splatOverlayRenderer = _splatOverlayGO.AddComponent<ModelRenderer>();
+			_splatOverlayRenderer.MaterialOverride = Material.Load( "materials/default/vertex_color.vmat" );
+			_splatOverlayGO.Enabled = false;
 		}
 
 		// Zoom slider at the bottom of the preview panel
@@ -658,14 +682,14 @@ public class TerrainGenerationTool : BaseWindow
 		zoomRow.Margin = new Sandbox.UI.Margin( 8, 4, 8, 6 );
 		zoomRow.Spacing = 8;
 
-		zoomRow.Add( new IconButton( "zoom_out", () => ZoomSlider.Value = MathF.Max( ZoomSlider.Minimum, ZoomSlider.Value - 100f ), this ) { IconSize = 16, FixedSize = new Vector2( 22, 22 ) } );
+		zoomRow.Add( new IconButton( "zoom_out", () => ZoomSlider.Value = MathF.Max( ZoomSlider.Minimum, ZoomSlider.Value - 500f ), this ) { IconSize = 16, FixedSize = new Vector2( 22, 22 ) } );
 		ZoomSlider = zoomRow.Add( new FloatSlider( this ), 1 );
-		ZoomSlider.Minimum = 2000f;
-		ZoomSlider.Maximum = 9000f;
-		ZoomSlider.Step = 100f;
-		ZoomSlider.Value = 9000f - _orbitDistance + 2000f;
+		ZoomSlider.Minimum = 10000f;
+		ZoomSlider.Maximum = 40000f;
+		ZoomSlider.Step = 500f;
+		ZoomSlider.Value = 40000f - _orbitDistance + 10000f;
 		ZoomSlider.OnValueEdited = UpdateOrbitFromZoom;
-		zoomRow.Add( new IconButton( "zoom_in", () => ZoomSlider.Value = MathF.Min( ZoomSlider.Maximum, ZoomSlider.Value + 100f ), this ) { IconSize = 16, FixedSize = new Vector2( 22, 22 ) } );
+		zoomRow.Add( new IconButton( "zoom_in", () => ZoomSlider.Value = MathF.Min( ZoomSlider.Maximum, ZoomSlider.Value + 500f ), this ) { IconSize = 16, FixedSize = new Vector2( 22, 22 ) } );
 
 		ApplyConditionalVisibility();
 		LoadFacepunchMaterialsAsync();
@@ -696,23 +720,18 @@ public class TerrainGenerationTool : BaseWindow
 				ResampleSplatGradient();
 				if ( PreviewSplatMaterials )
 				{
-					_previewMaterialPixels = null;
+					_previewMaterials = null;
 					RandomizeMaterialsAsync();
 				}
 				break;
 			case nameof( PreviewSplatMaterials ):
-				if ( PreviewSplatMaterials && ( _previewMaterialPixels == null || _previewMaterialPixels.Length < Math.Max( SplatLayerCount, 2 ) ) )
+				if ( PreviewSplatMaterials && ( _previewMaterials == null || _previewMaterials.Length < Math.Max( SplatLayerCount, 2 ) ) )
 				{
 					RandomizeMaterials();
 				}
 				if ( !PreviewSplatMaterials )
 				{
 					_previewMaterials = null;
-					_previewMaterialAlbedo = null;
-					_previewMaterialPixels = null;
-					_previewMaterialWidths = null;
-					_previewMaterialHeights = null;
-					_previewMaterialUvScales = null;
 				}
 				break;
 		}
@@ -839,19 +858,27 @@ public class TerrainGenerationTool : BaseWindow
 		_previewDirty = true;
 	}
 
-	async void LoadFacepunchMaterialsAsync()
+	void LoadFacepunchMaterialsAsync()
 	{
 		try
 		{
-			var result = await Package.FindAsync( "org:facepunch type:tmat sort:popular", 60, 0 );
-			_facepunchTmatIdents = result.Packages
-				.Where( p => p is not null && !string.IsNullOrEmpty( p.FullIdent ) )
-				.Select( p => p.FullIdent )
+			// Find all local tmat assets in the project's assets folder (not cloud ones).
+			// Prefer 1K variants when a material has multiple resolutions.
+			var allLocal = Editor.AssetSystem.All
+				.Where( a => a is not null && !a.IsDeleted && !a.IsCloud )
+				.Where( a => (a.RelativePath?.EndsWith( ".tmat" ) ?? false) )
 				.ToList();
+
+			var with1k = allLocal.Where( a => a.RelativePath.Contains( "_1k" ) ).ToList();
+
+			_localTmatAssets = with1k.Count > 0 ? with1k : allLocal;
+
+			if ( _localTmatAssets.Count == 0 )
+				Log.Warning( "No local .tmat terrain materials found in the project's assets folder" );
 		}
 		catch ( System.Exception e )
 		{
-			Log.Error( $"Failed to load cloud terrain materials: {e.Message}" );
+			Log.Error( $"Failed to find local terrain materials: {e.Message}" );
 		}
 	}
 
@@ -859,9 +886,9 @@ public class TerrainGenerationTool : BaseWindow
 	{
 		if ( !PreviewSplatMaterials ) return;
 
-		if ( _facepunchTmatIdents is null || _facepunchTmatIdents.Count == 0 )
+		if ( _localTmatAssets is null || _localTmatAssets.Count == 0 )
 		{
-			// Fetch the facepunch tmat list first, then randomize once it's available
+			// Load the local tmat list first, then randomize once it's available
 			_ = LoadFacepunchMaterialsAndRandomize();
 			return;
 		}
@@ -873,18 +900,23 @@ public class TerrainGenerationTool : BaseWindow
 	{
 		try
 		{
-			var result = await Package.FindAsync( "org:facepunch type:tmat sort:popular", 60, 0 );
-			_facepunchTmatIdents = result.Packages
-				.Where( p => p is not null && !string.IsNullOrEmpty( p.FullIdent ) )
-				.Select( p => p.FullIdent )
+			// Find all local tmat assets in the project's assets folder (not cloud ones).
+			// Prefer 1K variants when a material has multiple resolutions.
+			var allLocal = Editor.AssetSystem.All
+				.Where( a => a is not null && !a.IsDeleted && !a.IsCloud )
+				.Where( a => (a.RelativePath?.EndsWith( ".tmat" ) ?? false) )
 				.ToList();
 
-			if ( PreviewSplatMaterials && _facepunchTmatIdents.Count > 0 )
+			var with1k = allLocal.Where( a => a.RelativePath.Contains( "_1k" ) ).ToList();
+
+			_localTmatAssets = with1k.Count > 0 ? with1k : allLocal;
+
+			if ( PreviewSplatMaterials && _localTmatAssets.Count > 0 )
 				RandomizeMaterialsAsync();
 		}
 		catch ( System.Exception e )
 		{
-			Log.Error( $"Failed to load cloud terrain materials: {e.Message}" );
+			Log.Error( $"Failed to find local terrain materials: {e.Message}" );
 		}
 	}
 
@@ -901,54 +933,30 @@ public class TerrainGenerationTool : BaseWindow
 
 		try
 		{
-			var picked = new List<string>();
-			var pool = new List<string>( _facepunchTmatIdents );
-			for ( int i = 0; i < layerCount && pool.Count > 0; i++ )
-			{
-				int idx = Random.Shared.Next( pool.Count );
-				picked.Add( pool[idx] );
-				pool.RemoveAt( idx );
-			}
+			var pool = new List<Editor.Asset>( _localTmatAssets );
 
 			var materials = new List<TerrainMaterial>();
-			var albedo = new List<Texture>();
-			var uvScales = new List<float>();
-			var pixels = new List<Color32[]>();
-			var widths = new List<int>();
-			var heights = new List<int>();
 
-			foreach ( var ident in picked )
+			// Pull from the pool until we have layerCount usable materials (skipping any
+			// whose textures fail to compile) or the pool runs out.
+			while ( materials.Count < layerCount && pool.Count > 0 )
 			{
-				var asset = await Editor.AssetSystem.InstallAsync( ident );
-				if ( asset is null )
+				int idx = Random.Shared.Next( pool.Count );
+				var asset = pool[idx];
+				pool.RemoveAt( idx );
+
+				if ( !asset.TryLoadResource<TerrainMaterial>( out var found ) || found is null )
 				{
-					Log.Warning( $"Install returned null for '{ident}'" );
+					Log.Warning( $"Failed to load TerrainMaterial from '{asset.Path}'" );
 					continue;
 				}
 
-				// The cloud tmat packages compile into generated BCR/NHO textures. The primary
-				// asset is the tmat itself - its BCR texture (albedo RGB + roughness A) is what
-				// we render for the material preview.
-				float uvScale = 4f;
-
-				if ( asset.TryLoadResource<TerrainMaterial>( out var material ) )
-				{
-					uvScale = material.UVScale > 0 ? material.UVScale : 4f;
-				}
-
-				var tex = LoadTmatBcrTexture( asset.Path );
-				if ( tex is null || tex.IsError || !tex.IsValid )
-				{
-					Log.Warning( $"BCR texture for '{ident}' ('{asset.Path}') failed to load" );
+				// Only accept materials whose compiled BCR/NHO textures actually exist -
+				// otherwise the terrain renders a pink checkerboard.
+				if ( !IsMaterialUsable( found, asset.Path ) )
 					continue;
-				}
 
-				materials.Add( null );
-				albedo.Add( tex );
-				uvScales.Add( uvScale );
-				pixels.Add( tex.GetPixels() );
-				widths.Add( tex.Width );
-				heights.Add( tex.Height );
+				materials.Add( found );
 			}
 
 			if ( gen != _previewMaterialsGeneration ) return;
@@ -956,21 +964,11 @@ public class TerrainGenerationTool : BaseWindow
 			if ( materials.Count == 0 )
 			{
 				_previewMaterials = null;
-				_previewMaterialAlbedo = null;
-				_previewMaterialPixels = null;
-				_previewMaterialWidths = null;
-				_previewMaterialHeights = null;
-				_previewMaterialUvScales = null;
-				Log.Warning( "No facepunch terrain materials could be loaded" );
+				Log.Warning( "No local terrain materials could be loaded" );
 			}
 			else
 			{
 				_previewMaterials = materials.ToArray();
-				_previewMaterialAlbedo = albedo.ToArray();
-				_previewMaterialPixels = pixels.ToArray();
-				_previewMaterialWidths = widths.ToArray();
-				_previewMaterialHeights = heights.ToArray();
-				_previewMaterialUvScales = uvScales.ToArray();
 			}
 
 			_previewDirty = true;
@@ -986,36 +984,37 @@ public class TerrainGenerationTool : BaseWindow
 		}
 	}
 
-	Texture LoadTmatBcrTexture( string tmatPath )
+	/// <summary>
+	/// Checks that a terrain material's compiled BCR/NHO textures are usable. The terrain shader
+	/// samples these bindlessly, and a missing/failed compile shows up as a pink checkerboard.
+	/// </summary>
+	bool IsMaterialUsable( TerrainMaterial material, string ident )
 	{
-		if ( string.IsNullOrEmpty( tmatPath ) ) return null;
+		if ( material is null ) return false;
 
-		// The compiled BCR texture is named "<tmat-without-ext>_tmat_bcr.generated.vtex"
-		string stem = tmatPath.Replace( '\\', '/' );
-		int dot = stem.LastIndexOf( '.' );
-		if ( dot > 0 ) stem = stem.Substring( 0, dot );
-
-		string bcrPath = $"{stem}_tmat_bcr.generated.vtex";
-
-		var tex = Texture.Load( bcrPath, false );
-		if ( tex != null && !tex.IsError && tex.IsValid ) return tex;
-
-		// Fall back to scanning the asset system for the tmat's generated BCR texture
-		string stemName = Path.GetFileNameWithoutExtension( stem ).ToLowerInvariant();
-		foreach ( var a in Editor.AssetSystem.All )
+		try
 		{
-			if ( a is null || a.IsDeleted ) continue;
-			if ( a.AssetType is null || (a.AssetType.FileExtension ?? "") != "vtex" ) continue;
+			var bcr = material.BCRTexture;
+			if ( bcr is null || bcr.IsError || !bcr.IsValid )
+			{
+				Log.Warning( $"Skipping '{ident}': BCR texture missing or failed to compile" );
+				return false;
+			}
 
-			var name = Path.GetFileNameWithoutExtension( a.RelativePath ?? "" ).ToLowerInvariant();
-			if ( !name.Contains( "tmat_bcr", StringComparison.Ordinal ) ) continue;
-			if ( !name.Contains( stemName, StringComparison.Ordinal ) ) continue;
+			var nho = material.NHOTexture;
+			if ( nho is null || nho.IsError || !nho.IsValid )
+			{
+				Log.Warning( $"Skipping '{ident}': NHO texture missing or failed to compile" );
+				return false;
+			}
 
-			var t = Texture.Load( a.Path, false );
-			if ( t != null && !t.IsError && t.IsValid ) return t;
+			return true;
 		}
-
-		return null;
+		catch ( System.Exception e )
+		{
+			Log.Warning( $"Skipping '{ident}': {e.Message}" );
+			return false;
+		}
 	}
 
 	void AddPropsTab( string name, string icon, Widget page, string tooltip )
@@ -1057,6 +1056,10 @@ public class TerrainGenerationTool : BaseWindow
 	[EditorEvent.Frame]
 	public void FrameUpdate()
 	{
+		// Tick the preview scene so the terrain clipmap builds and updates
+		if ( RenderCanvas != null && RenderCanvas.Scene.IsValid() )
+			RenderCanvas.Scene.EditorTick( RealTime.Now, RealTime.Delta );
+
 		if ( !_previewDirty ) return;
 		if ( RealTime.Now - _lastPreviewRegen < 0.1f ) return;
 		if ( _isGenerating ) return;
@@ -1069,7 +1072,7 @@ public class TerrainGenerationTool : BaseWindow
 
 	async void RegeneratePreviewAsync()
 	{
-		if ( _previewRenderer is null || !_previewRenderer.IsValid() ) return;
+		if ( _previewTerrain is null || !_previewTerrain.IsValid() ) return;
 		if ( string.IsNullOrEmpty( CategoryArray?.Selected ) || string.IsNullOrEmpty( ShapeArray?.Selected ) ) return;
 
 		if ( _isGenerating ) return;
@@ -1184,7 +1187,7 @@ public class TerrainGenerationTool : BaseWindow
 		if ( !isAltHeld && GizmoInstance.Input.IsHovered && MathF.Abs( Editor.Application.MouseWheelDelta.y ) > 0.001f )
 		{
 			var wheelDelta = Editor.Application.MouseWheelDelta.y;
-			ZoomSlider.Value = Math.Clamp( ZoomSlider.Value + wheelDelta * 100f, ZoomSlider.Minimum, ZoomSlider.Maximum );
+			ZoomSlider.Value = Math.Clamp( ZoomSlider.Value + wheelDelta * 500f, ZoomSlider.Minimum, ZoomSlider.Maximum );
 			UpdateOrbitFromZoom();
 		}
 
@@ -1236,7 +1239,7 @@ public class TerrainGenerationTool : BaseWindow
 
 	void RegeneratePreview()
 	{
-		if ( _previewRenderer is null || !_previewRenderer.IsValid() ) return;
+		if ( _previewTerrain is null || !_previewTerrain.IsValid() ) return;
 		if ( string.IsNullOrEmpty( CategoryArray?.Selected ) || string.IsNullOrEmpty( ShapeArray?.Selected ) ) return;
 
 		BuildSplatColors();
@@ -1258,50 +1261,117 @@ public class TerrainGenerationTool : BaseWindow
 
 	void UpdatePreviewTerrain( float[,] heightmap )
 	{
-		if ( _previewRenderer is null || !_previewRenderer.IsValid() ) return;
+		if ( _previewTerrain is null || !_previewTerrain.IsValid() ) return;
+		if ( _previewStorage is null ) return;
 
-		int width = heightmap.GetLength( 0 );
-		int height = heightmap.GetLength( 1 );
+		int res = heightmap.GetLength( 0 );
 
-		// Build a grid mesh from the heightmap
-		const float worldSize = 5007f;
-		const float worldHeight = 1000f;
-		float cellX = worldSize / width;
-		float cellY = worldSize / height;
-
-		var vertices = new Vertex[width * height];
-		var indices = new List<int>();
-
-		// If the Splat tab is active, preview with splat colors so it matches what would be applied to terrain.
-		bool showSplat = _activePropsTab == "Splat";
-		float[,] previewSplat = null;
-		if ( showSplat )
+		// Write the heightmap into the terrain storage (0..65535 maps across TerrainHeight)
+		ushort[] heightArray = new ushort[res * res];
+		for ( int y = 0; y < res; y++ )
 		{
-			previewSplat = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+			for ( int x = 0; x < res; x++ )
+			{
+				float h = Math.Clamp( heightmap[x, y], 0f, 1f );
+				heightArray[y * res + x] = (ushort)Math.Clamp( (int)(h * 65535f), 0, 65535 );
+			}
+		}
+		_previewStorage.HeightMap = heightArray;
+
+		// Build the control map (which materials go where). When the material preview is
+		// enabled and we have assigned bluedock materials, blend them by the splat map
+		// exactly like the exported terrain would. Otherwise use the single default material.
+		uint[] controlMap = new uint[res * res];
+
+		bool useMaterials = _activePropsTab == "Splat" && PreviewSplatMaterials && _previewMaterials != null && _previewMaterials.Length > 0;
+
+		if ( useMaterials )
+		{
+			float[,] splatmap = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+
+			int matCount = _previewMaterials.Length;
+			for ( int y = 0; y < res; y++ )
+			{
+				for ( int x = 0; x < res; x++ )
+				{
+					float layerPos = Math.Clamp( splatmap[x, y], 0f, matCount - 1f );
+					int baseId = (int)MathF.Floor( layerPos );
+					int overlayId = Math.Min( baseId + 1, matCount - 1 );
+					byte blend = (byte)Math.Clamp( (int)((layerPos - baseId) * 255f), 0, 255 );
+
+					controlMap[y * res + x] = new CompactTerrainMaterial( (byte)baseId, (byte)overlayId, blend, false ).Packed;
+				}
+			}
+		}
+		else
+		{
+			// Default: single material, no blending
+			for ( int i = 0; i < controlMap.Length; i++ )
+			{
+				controlMap[i] = new CompactTerrainMaterial( 0, 0, 0, false ).Packed;
+			}
 		}
 
-		// When enabled, blend the randomly assigned facepunch material albedos exactly like the splat map blends layers.
-		bool showMaterialBlend = showSplat && PreviewSplatMaterials && _previewMaterialPixels != null;
+		_previewStorage.ControlMap = controlMap;
 
-		// Snapshot the material data so the parallel loop sees one consistent set
-		var blendPixels = showMaterialBlend ? _previewMaterialPixels : null;
-		var blendWidths = showMaterialBlend ? _previewMaterialWidths : null;
-		var blendHeights = showMaterialBlend ? _previewMaterialHeights : null;
-		var blendUvScales = showMaterialBlend ? _previewMaterialUvScales : null;
-
-		Parallel.For( 0, height, y =>
+		// Assign the materials and push everything to the GPU
+		if ( _previewMaterials != null )
 		{
-			for ( int x = 0; x < width; x++ )
+			_previewStorage.Materials.Clear();
+			_previewStorage.Materials.AddRange( _previewMaterials );
+		}
+
+		// Only the terrain shows when we're on the Splat tab previewing the real materials.
+		// The terrain must be enabled before touching its GPU state, otherwise SyncGPUTexture
+		// throws - so sync only when it's going to be visible.
+		if ( _previewTerrain != null ) _previewTerrain.Enabled = useMaterials;
+
+		if ( useMaterials && _previewTerrain != null && _previewTerrain.IsValid() )
+		{
+			_previewTerrain.Create();
+			_previewTerrain.SyncGPUTexture();
+			_previewTerrain.UpdateMaterialsBuffer();
+		}
+
+		// Overlay logic: on the Splat tab with the material preview off, overlay the splatmap
+		// colors so you can see the layer layout. On any other tab, overlay the original
+		// height-based color we used to paint the mesh. When materials are previewing, no overlay.
+		bool showSplatOverlay = _activePropsTab == "Splat" && !useMaterials;
+		UpdateSplatOverlay( heightmap, !useMaterials, showSplatOverlay );
+	}
+
+	void UpdateSplatOverlay( float[,] heightmap, bool visible, bool splatColors )
+	{
+		if ( _splatOverlayRenderer is null || !_splatOverlayRenderer.IsValid() ) return;
+
+		// Always rebuild the mesh so the heightmap/colors stay in sync even while hidden.
+		int res = heightmap.GetLength( 0 );
+
+		const float worldSize = PreviewTerrainSize;
+		const float worldHeight = PreviewTerrainHeight;
+		float cellX = worldSize / res;
+		float cellY = worldSize / res;
+
+		float[,] splatmap = null;
+		if ( splatColors )
+			splatmap = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+
+		var vertices = new Vertex[res * res];
+		var indices = new List<int>();
+
+		Parallel.For( 0, res, y =>
+		{
+			for ( int x = 0; x < res; x++ )
 			{
-				float h = heightmap[x, y];
+				float h = Math.Clamp( heightmap[x, y], 0f, 1f );
 
-				Vector3 position = new Vector3( x * cellX - worldSize * 0.5f, y * cellY - worldSize * 0.5f, h * worldHeight );
+				// Local space - the overlay GO is parented to the centered terrain GO
+				Vector3 position = new Vector3( x * cellX, y * cellY, h * worldHeight );
 
-				// Compute a normal from heightmap gradients
 				float hL = heightmap[Math.Max( x - 1, 0 ), y];
-				float hR = heightmap[Math.Min( x + 1, width - 1 ), y];
+				float hR = heightmap[Math.Min( x + 1, res - 1 ), y];
 				float hD = heightmap[x, Math.Max( y - 1, 0 )];
-				float hU = heightmap[x, Math.Min( y + 1, height - 1 )];
+				float hU = heightmap[x, Math.Min( y + 1, res - 1 )];
 
 				float dx = (hR - hL) * worldHeight / (2.0f * cellX);
 				float dy = (hU - hD) * worldHeight / (2.0f * cellY);
@@ -1309,13 +1379,9 @@ public class TerrainGenerationTool : BaseWindow
 				Vector3 normal = new Vector3( -dx, -dy, 1.0f ).Normal;
 
 				Color color;
-				if ( blendPixels != null )
+				if ( splatColors && splatmap != null )
 				{
-					color = SampleMaterialBlend( previewSplat[x, y], position, blendPixels, blendWidths, blendHeights, blendUvScales );
-				}
-				else if ( showSplat )
-				{
-					float layerPos = Math.Clamp( previewSplat[x, y], 0f, SplatLayerCount - 1f );
+					float layerPos = Math.Clamp( splatmap[x, y], 0f, SplatLayerCount - 1f );
 					int layer0 = (int)MathF.Floor( layerPos );
 					int layer1 = Math.Min( layer0 + 1, SplatLayerCount - 1 );
 					float t = layerPos - layer0;
@@ -1326,22 +1392,23 @@ public class TerrainGenerationTool : BaseWindow
 				}
 				else
 				{
-					color = Color.Lerp( Color.FromBytes( 60, 90, 40 ), Color.FromBytes( 200, 185, 150 ), Math.Clamp( h, 0, 1 ) );
+					// The original height-based material color we painted on the mesh
+					color = Color.Lerp( Color.FromBytes( 60, 90, 40 ), Color.FromBytes( 200, 185, 150 ), h );
 				}
 
-				vertices[x + y * width] = new Vertex( position, normal, normal, new Vector4( 0, 0, 0, 1 ) );
-				vertices[x + y * width].Color = color.ToColor32();
+				vertices[x + y * res] = new Vertex( position, normal, normal, new Vector4( 0, 0, 0, 1 ) );
+				vertices[x + y * res].Color = color.ToColor32();
 			}
 		} );
 
-		for ( int y = 0; y < height - 1; y++ )
+		for ( int y = 0; y < res - 1; y++ )
 		{
-			for ( int x = 0; x < width - 1; x++ )
+			for ( int x = 0; x < res - 1; x++ )
 			{
-				int a = x + y * width;
-				int b = (x + 1) + y * width;
-				int c = (x + 1) + (y + 1) * width;
-				int d = x + (y + 1) * width;
+				int a = x + y * res;
+				int b = (x + 1) + y * res;
+				int c = (x + 1) + (y + 1) * res;
+				int d = x + (y + 1) * res;
 
 				indices.Add( a );
 				indices.Add( b );
@@ -1352,64 +1419,15 @@ public class TerrainGenerationTool : BaseWindow
 			}
 		}
 
-		var mesh = new Mesh( _previewRenderer.MaterialOverride );
+		var mesh = new Mesh( _splatOverlayRenderer.MaterialOverride );
 		mesh.CreateVertexBuffer( vertices.Length, vertices );
 		mesh.CreateIndexBuffer( indices.Count, indices );
-		mesh.Bounds = BBox.FromPositionAndSize( 0, new Vector3( worldSize, worldSize, worldHeight ) );
+		mesh.Bounds = BBox.FromPositionAndSize( new Vector3( worldSize * 0.5f, worldSize * 0.5f, worldHeight * 0.5f ), new Vector3( worldSize, worldSize, worldHeight ) );
 
-		var model = Model.Builder.AddMesh( mesh ).Create();
+		_splatOverlayRenderer.Model = Model.Builder.AddMesh( mesh ).Create();
 
-		_previewRenderer.Model = model;
-	}
-
-	/// <summary>
-	/// Samples the blended albedo for a splat value. Works just like the exported splat map:
-	/// each layer maps to one of the assigned materials, and adjacent layers blend by the
-	/// fractional part of the splat value.
-	/// </summary>
-	Color SampleMaterialBlend( float splatValue, Vector3 position, Color32[][] pixels, int[] widths, int[] heights, float[] uvScales )
-	{
-		int count = pixels.Length;
-		if ( count == 0 ) return Color.White;
-
-		float layerPos = Math.Clamp( splatValue, 0f, count - 1f );
-		int layer0 = (int)MathF.Floor( layerPos );
-		int layer1 = Math.Min( layer0 + 1, count - 1 );
-		float t = layerPos - layer0;
-
-		Color c0 = SampleAlbedo( layer0, position, pixels, widths, heights, uvScales );
-		Color c1 = SampleAlbedo( layer1, position, pixels, widths, heights, uvScales );
-		return Color.Lerp( c0, c1, t );
-	}
-
-	Color SampleAlbedo( int layer, Vector3 position, Color32[][] pixels, int[] widths, int[] heights, float[] uvScales )
-	{
-		if ( layer < 0 || layer >= pixels.Length ) return Color.White;
-		if ( pixels is null || layer >= pixels.Length ) return Color.White;
-
-		var pixelsForLayer = pixels[layer];
-		if ( pixelsForLayer is null || pixelsForLayer.Length == 0 ) return Color.White;
-
-		int tw = widths[layer];
-		int th = heights[layer];
-		if ( tw <= 0 || th <= 0 ) return Color.White;
-
-		float uvScale = uvScales != null && uvScales.Length > layer && uvScales[layer] > 0 ? uvScales[layer] : 4f;
-
-		// Tiled UV from world position, matching how terrain materials repeat
-		float u = (position.x / uvScale) % 1f;
-		if ( u < 0f ) u += 1f;
-		float v = (position.y / uvScale) % 1f;
-		if ( v < 0f ) v += 1f;
-
-		int px = Math.Clamp( (int)(u * tw), 0, tw - 1 );
-		int py = Math.Clamp( (int)(v * th), 0, th - 1 );
-
-		int index = py * tw + px;
-		if ( index < 0 || index >= pixelsForLayer.Length ) return Color.White;
-
-		var c = pixelsForLayer[index];
-		return new Color( c.r / 255f, c.g / 255f, c.b / 255f, 1f );
+		// Toggle visibility after the rebuild
+		if ( _splatOverlayGO != null ) _splatOverlayGO.Enabled = visible;
 	}
 
 	float[,] BuildHeightmap( int width, int height,
