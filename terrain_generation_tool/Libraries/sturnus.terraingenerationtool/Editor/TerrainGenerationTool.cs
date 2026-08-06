@@ -14,13 +14,15 @@ using static Sandbox.Gradient;
 using Sturnus.TerrainGenerationTool;
 using Sandbox.Utility;
 using System.Threading;
+using System.Threading.Tasks;
+using Parallel = System.Threading.Tasks.Parallel;
 using Sturnus.TerrainGenerationTool.RiverStream;
 using Sandbox.Services;
 using System.Reflection;
 using static TerrainGenerationTool;
 
-[Dock( "Editor", "Terrain Generation Tool", "terrain" )]
-public class TerrainGenerationTool : Widget
+[EditorApp( "Terrain Generation Tool", "terrain", "Generate procedural terrain with a realtime 3D preview" )]
+public class TerrainGenerationTool : BaseWindow
 {
 	public string GenerationPath { get; set; } = Editor.FileSystem.Content.GetFullPath( "" ) + "\\TerrainGenerationTool\\";
 	public string GenerationLocalPath { get; set; } = "\\TerrainGenerationTool\\";
@@ -40,6 +42,12 @@ public class TerrainGenerationTool : Widget
 		x2048 = 2048,
 		x4096 = 4096,
 		X8192 = 8192
+	}
+
+	public enum SplatDispersionMode
+	{
+		Evenly,
+		Natural
 	}
 
 	//enum TerrainCategoryEnum;
@@ -84,17 +92,64 @@ public class TerrainGenerationTool : Widget
 	Gradient SplatMapGradient = new Gradient( new Gradient.ColorFrame( 0.0f, Color.Cyan ), new Gradient.ColorFrame( 0.25f, Color.Red ), new Gradient.ColorFrame( 0.5f, Color.Yellow ), new Gradient.ColorFrame( 0.75f, Color.Green ) );
 	SKColor[] _splatcolors { get; set; }
 
+	[Step( 1 ), MinMax( 2, 32 )] int SplatLayerCount { get; set; } = 8;
+	[Step( 1 ), MinMax( 1, 8 )] int SplatMapCount { get; set; } = 1;
+	SplatDispersionMode SplatDispersion { get; set; } = SplatDispersionMode.Evenly;
+	[Step( 0.05f ), MinMax( 0f, 1f )] float SplatBlendStrength { get; set; } = 0.35f;
+
+	[Property] bool PreviewSplatMaterials { get; set; } = false;
+
 	float[] _splatthresholds = { 0f, 0.25f, 0.50f, 0.75f };
 	float[,] _heightmap;
 	float[,] _splatmap;
+	float[,] _previewHeightmap;
+
+	TerrainMaterial[] _previewMaterials;
+	Texture[] _previewMaterialAlbedo;
+	Color32[][] _previewMaterialPixels;
+	int[] _previewMaterialWidths;
+	int[] _previewMaterialHeights;
+	float[] _previewMaterialUvScales;
+	int _previewMaterialsGeneration = 0;
+	List<string> _facepunchTmatIdents;
 
 	Texture _preview_image_texture;
 	Editor.TextureWidget PreviewImage;
 	Texture _preview_splatmap_texture;
 	Editor.TextureWidget PreviewSplatmap;
 
-	SegmentedControl ShapeArray;
-	SegmentedControl CategoryArray;
+	SceneRenderingWidget RenderCanvas;
+	CameraComponent Camera;
+	Gizmo.Instance GizmoInstance;
+	GameObject _previewGO;
+	ModelRenderer _previewRenderer;
+	float _orbitDistance = 4200f;
+	float _orbitAngle = 0f;
+	float _orbitPitch = 30f;
+	bool _autoSpin = true;
+	FloatSlider ZoomSlider;
+	const float SpinSpeed = 8f; // degrees per second
+	const int PreviewResolution = 512;
+
+	SerializedObject _serialized;
+	bool _previewDirty;
+	float _lastPreviewRegen = float.MinValue;
+	bool _isGenerating = false;
+	int _generationToken = 0;
+
+	List<Widget> _domainWarpingWidgets = new();
+	List<Widget> _riverCarvingWidgets = new();
+	List<Widget> _stagingAreaWidgets = new();
+
+	Dictionary<string, Widget> _propsPages = new();
+	SegmentedControl _propsTabBar;
+	Widget _propsContent;
+	string _activePropsTab;
+	Button _randomizeMaterialsButton;
+	Label _materialLoadingLabel;
+
+	WrapSelector ShapeArray;
+	WrapSelector CategoryArray;
 
 	public class DynamicEnum
 	{
@@ -111,6 +166,7 @@ public class TerrainGenerationTool : Widget
 
 		public int GetValue( string name )
 		{
+			if ( string.IsNullOrEmpty( name ) ) return -1;
 			return _values.TryGetValue( name, out var value ) ? value : -1; // Return -1 if not found
 		}
 
@@ -250,8 +306,17 @@ public class TerrainGenerationTool : Widget
 		}
 	}
 
-	public TerrainGenerationTool( Widget parent ) : base( parent, false )
+	public TerrainGenerationTool() : base()
 	{
+		WindowTitle = "Terrain Generation Tool";
+		SetWindowIcon( "terrain" );
+		MinimumSize = new Vector2( 1000, 700 );
+		Size = new Vector2( 1500, 900 );
+		StartCentered = true;
+
+		_serialized = this.GetSerialized();
+		_serialized.OnPropertyChanged += OnSerializedPropertyChanged;
+
 		string[] terrainCategoryClasses = GetTerrainCategoryClasses( terrainCategoryClassesTypes.ToArray() );
 		string[] terrainShapeMethods = GetTerrainShapeMethods( typeof(Islands) );
 		
@@ -259,298 +324,203 @@ public class TerrainGenerationTool : Widget
 		Directory.CreateDirectory( GenerationPath );
 
 		SplatMapGradient.Blending = Gradient.BlendMode.Stepped;
-		MinimumSize = 500;
-		var scroll = new ScrollArea( null );
+
+		Layout = Layout.Row();
+		Layout.Margin = 0;
+		Layout.Spacing = 0;
+
+		// ---------- Left: options panel ----------
+		var scroll = new ScrollArea( this );
 		scroll.Canvas = new Widget( scroll );
 		scroll.Canvas.Layout = Layout.Column();
 		scroll.Canvas.Layout.Margin = 10;
-		Layout = Layout.Column();
+		scroll.Canvas.Layout.Spacing = 5;
+		scroll.MinimumWidth = 400;
+		scroll.MaximumWidth = 480;
 		Layout.Add( scroll );
-		
-		Layout.Margin = 0;
-		Layout.Spacing = 5;
 
 		var body = scroll.Canvas.Layout;
 
-		var DimensionsLabel = body.Add( new Label( "Terrain Dimensions" ) );
-		var DimensionsEnum = body.Add( new EnumControlWidget( this.GetSerialized().GetProperty( nameof( TerrainDimensionsEnum ) ) ) );
+		// ---------- Left: grouped property tabs ----------
+		var propsRoot = body.Add( new Widget( null ), 1 );
+		propsRoot.Layout = Layout.Column();
+		propsRoot.Layout.Spacing = 5;
 
+		_propsTabBar = propsRoot.Layout.Add( new SegmentedControl() );
+		_propsTabBar.ShowText = true;
+		_propsTabBar.FixedHeight = Theme.RowHeight * 1.6f;
+		_propsTabBar.OnSelectedChanged += ( name ) => SelectPropsTab( name );
 
-		var CategoryLabel = body.Add( new Label( "Terrain Category" ) );
-		CategoryArray = body.Add( new SegmentedControl( ) );
+		_propsContent = propsRoot.Layout.Add( new Widget( null ), 1 );
+		_propsContent.Layout = Layout.Column();
+		_propsContent.Layout.Margin = 0;
+		_propsContent.Layout.Alignment = TextFlag.Top;
+
+		// --- Terrain Type tab ---
+		var typePage = CreatePropsPage();
+
+		typePage.Layout.Add( new Label( "Terrain Dimensions" ) );
+		typePage.Layout.Add( new EnumControlWidget( _serialized.GetProperty( nameof( TerrainDimensionsEnum ) ) ) );
+
+		typePage.Layout.Add( new Label( "Terrain Category" ) );
+		CategoryArray = typePage.Layout.Add( new WrapSelector() );
 		for ( int i = 0; i < TerrainCategoryArray.ToArray().GetLength( 0 ); i++ )
 		{
-			// Initialize an empty list to store the values of the current row
 			List<string> rowValues = new List<string>();
-
 			rowValues.Add( TerrainCategoryArray.ToArray()[i] );
-
-			// Join the row's values with a comma and print
 			CategoryArray.AddOption( rowValues[0] );
-			
 		}
-		var ShapeLabel = body.Add( new Label( "Terrain Shape" ) );
-		ShapeArray = body.Add( new SegmentedControl() );
+		typePage.Layout.Add( new Label( "Terrain Shape" ) );
+		ShapeArray = typePage.Layout.Add( new WrapSelector() );
 		InitialShapes();
-		CategoryArray.MouseClick += () =>
+		CategoryArray.OnSelectedChanged += ( _ ) =>
 		{
 			RebuildShapes();
+			_previewDirty = true;
 		};
-		body.AddSpacingCell( 5 );
-		var MinHeightLabel = body.Add( new Label( "Min Height (relative)" ) );
-		var MinHeightFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainMinHeight ) ) ) );
-		body.AddSpacingCell( 5 );
-		var MaxHeightLabel = body.Add( new Label( "Max Height (relative)" ) );
-		var MaxHeightFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainMaxHeight ) ) ) );
-		body.AddSpacingCell( 5 );
-		var TerrainPlaneScaleLabel = body.Add( new Label( "Terrain Plane Scale" ) );
-		var TerrainPlaneScaleNumber = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( TerrainPlaneScale ) ) ) );
-		body.AddSpacingCell( 5 );
-		var TerrainSeedLabel = body.Add( new Label( "Terrain Seed" ) );
-		var TerrainSeedNumber = body.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( TerrainSeed ) ) ) );
-		body.AddSpacingCell( 5 );
-		var SmoothingPassesLabel = body.Add( new Label( "Smoothing Passes" ) );
-		var SmoothingPassesNumber = body.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( SmoothingPasses ) ) ) );
-		body.AddSpacingCell( 5 );
-		var NoiseLayerStacksLabel = body.Add( new Label( "Noise Layer Stacks" ) );
-		var NoiseLayerStacksNumber = body.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( NoiseLayerStacks ) ) ) );
-		body.AddSpacingCell( 5 );
-		var SplatMapColorsLabel = body.Add( new Label( "Splatmap Colors/Threshold" ) );
-		var SplatMapColorsNumber = body.Add( new GradientControlWidget( this.GetSerialized().GetProperty( nameof( SplatMapGradient ) ) ) );
-		body.AddSpacingCell( 5 );
-		var DomainWarpingLabel = body.Add( new Label( "Domain Warping" ) );
-		var DomainWarpingBool = body.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarping ) ) ) );
-		body.AddSpacingCell( 5 );
-		if ( DomainWarping )
+		ShapeArray.OnSelectedChanged += ( _ ) => _previewDirty = true;
+		if ( CategoryArray.Children.Count() > 0 )
 		{
-			var DomainWarpingSizeLabel = body.Add( new Label( "Domain Warping (Size)" ) );
-			var DomainWarpingSizeFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingSize ) ) ) );
-			var DomainWarpingStrengthLabel = body.Add( new Label( "Domain Warping (Strength)" ) );
-			var DomainWarpingStrengthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( DomainWarpingStrength ) ) ) );
-			DomainWarpingBool.MouseClick += () =>
-			{
-				if ( DomainWarping )
-				{
-					DomainWarpingSizeLabel.Enabled = true;
-					DomainWarpingSizeFloat.Enabled = true;
-					DomainWarpingSizeLabel.Visible = true;
-					DomainWarpingSizeFloat.Visible = true;
-
-					DomainWarpingStrengthLabel.Enabled = true;
-					DomainWarpingStrengthFloat.Enabled = true;
-					DomainWarpingStrengthLabel.Visible = true;
-					DomainWarpingStrengthFloat.Visible = true;
-				}
-				else
-				{
-					DomainWarpingSizeLabel.Enabled = false;
-					DomainWarpingSizeFloat.Enabled = false;
-					DomainWarpingSizeLabel.Visible = false;
-					DomainWarpingSizeFloat.Visible = false;
-
-					DomainWarpingStrengthLabel.Enabled = false;
-					DomainWarpingStrengthFloat.Enabled = false;
-					DomainWarpingStrengthLabel.Visible = false;
-					DomainWarpingStrengthFloat.Visible = false;
-				}
-			};
+			CategoryArray.SelectedIndex = 0;
+			CategoryArray.Selected = CategoryArray.Children.First().Name;
 		}
-		/*body.AddSpacingCell( 5 );
-		var ErosionSimulationLabel = body.Add( new Label( "Erosion Simulation" ) );
-		var ErosionSimulationBool = body.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( ErosionSimulation ) ) ) );
-		if ( ErosionSimulation )
+		RebuildShapes();
+		if ( ShapeArray.Children.Count() > 0 )
 		{
-		}*/
+			ShapeArray.SelectedIndex = 0;
+			ShapeArray.Selected = ShapeArray.Children.First().Name;
+		}
+		AddPropsTab( "Terrain Type", "terrain", typePage, "Terrain dimensions, category and shape" );
+
+		// --- Height / Scale tab ---
+		var heightPage = CreatePropsPage();
+
+		heightPage.Layout.Add( new Label( "Min Height (relative)" ) );
+		heightPage.Layout.Add( FloatSlider( nameof( TerrainMinHeight ) ) );
+		heightPage.Layout.Add( new Label( "Max Height (relative)" ) );
+		heightPage.Layout.Add( FloatSlider( nameof( TerrainMaxHeight ) ) );
+		heightPage.Layout.Add( new Label( "Terrain Plane Scale" ) );
+		heightPage.Layout.Add( FloatSlider( nameof( TerrainPlaneScale ) ) );
+		heightPage.Layout.Add( new Label( "Terrain Seed" ) );
+		var seedRow = heightPage.Layout.AddRow();
+		seedRow.Spacing = 4;
+		var seedControl = seedRow.Add( new IntegerControlWidget( _serialized.GetProperty( nameof( TerrainSeed ) ) ), 1 );
+		seedRow.Add( new IconButton( "casino", RandomizeSeed, this )
+		{
+			ToolTip = "Randomize seed",
+			IconSize = 16,
+			FixedSize = new Vector2( 26, 26 )
+		} );
+		AddPropsTab( "Height/Scale", "straighten", heightPage, "Terrain height, plane scale and seed" );
+
+		// --- Smooth / Noise tab ---
+		var noisePage = CreatePropsPage();
+
+		noisePage.Layout.Add( new Label( "Smoothing Passes" ) );
+		noisePage.Layout.Add( IntSlider( nameof( SmoothingPasses ) ) );
+		noisePage.Layout.Add( new Label( "Noise Layer Stacks" ) );
+		noisePage.Layout.Add( IntSlider( nameof( NoiseLayerStacks ) ) );
+		AddPropsTab( "Smooth/Noise", "grain", noisePage, "Terrain smoothing and noise layers" );
+
+		// --- Splat tab ---
+		var splatPage = CreatePropsPage();
+
+		splatPage.Layout.Add( new Label( "Splat Layer Count" ) );
+		splatPage.Layout.Add( IntSlider( nameof( SplatLayerCount ) ) );
+		splatPage.Layout.Add( new Label( "Splat Map Count" ) );
+		splatPage.Layout.Add( IntSlider( nameof( SplatMapCount ) ) );
+		splatPage.Layout.Add( new Label( "Dispersion" ) );
+		splatPage.Layout.Add( new EnumControlWidget( _serialized.GetProperty( nameof( SplatDispersion ) ) ) );
+		splatPage.Layout.Add( new Label( "Blend Strength" ) );
+		splatPage.Layout.Add( FloatSlider( nameof( SplatBlendStrength ) ) );
+		splatPage.Layout.Add( new Label( "Splatmap Colors/Threshold" ) );
+		splatPage.Layout.Add( new GradientControlWidget( _serialized.GetProperty( nameof( SplatMapGradient ) ) ) );
+		splatPage.Layout.Add( new Label( "Preview Materials" ) );
+		splatPage.Layout.Add( new BoolControlWidget( _serialized.GetProperty( nameof( PreviewSplatMaterials ) ) ) );
+		var materialHint = new Label( "Assigns random facepunch cloud materials to the splat layers so you can preview the material blending on the terrain." );
+		materialHint.SetStyles( "font-size: 10px; color: #888;" );
+		splatPage.Layout.Add( materialHint );
+		var randomizeRow = splatPage.Layout.AddRow();
+		_randomizeMaterialsButton = randomizeRow.Add( new Button( "Randomize Materials", "casino" ) );
+		_randomizeMaterialsButton.Clicked += RandomizeMaterials;
+		_materialLoadingLabel = randomizeRow.Add( new Label( "Loading..." ) );
+		_materialLoadingLabel.SetStyles( "font-size: 10px; color: #888;" );
+		_materialLoadingLabel.Visible = false;
+		AddPropsTab( "Splat", "palette", splatPage, "Splatmap layers, maps, colors and dispersion" );
+
+		// --- Warping tab ---
+		var warpPage = CreatePropsPage();
+
+		warpPage.Layout.Add( new Label( "Domain Warping" ) );
+		warpPage.Layout.Add( new BoolControlWidget( _serialized.GetProperty( nameof( DomainWarping ) ) ) );
+		var DomainWarpingSizeLabel = warpPage.Layout.Add( new Label( "Domain Warping (Size)" ) );
+		var DomainWarpingSizeFloat = warpPage.Layout.Add( FloatSlider( nameof( DomainWarpingSize ) ) );
+		var DomainWarpingStrengthLabel = warpPage.Layout.Add( new Label( "Domain Warping (Strength)" ) );
+		var DomainWarpingStrengthFloat = warpPage.Layout.Add( FloatSlider( nameof( DomainWarpingStrength ) ) );
+		_domainWarpingWidgets.AddRange( new Widget[] { DomainWarpingSizeLabel, DomainWarpingSizeFloat, DomainWarpingStrengthLabel, DomainWarpingStrengthFloat } );
+		AddPropsTab( "Warping", "blur_on", warpPage, "Domain warping options" );
+
+		// --- River tab ---
+		var riverPage = CreatePropsPage();
+
+		riverPage.Layout.Add( new Label( "River Carving" ) );
+		riverPage.Layout.Add( new BoolControlWidget( _serialized.GetProperty( nameof( RiverCarvingBool ) ) ) );
+		var RiverCarvingFrequencyLabel = riverPage.Layout.Add( new Label( "RiverCarvingFrequency" ) );
+		var RiverCarvingFrequencyFloat = riverPage.Layout.Add( FloatSlider( nameof( RiverCarvingFrequency ) ) );
+		/*var RiverCarvingStrength = riverPage.Layout.Add( new Label("RiverCarvingStrength"));
+		var RiverCarvingStrengthFloat = riverPage.Layout.Add( FloatSlider( nameof(RiverCarvingStrength) ) );*/
+		var RiverCarvingDepthLabel = riverPage.Layout.Add( new Label( "RiverCarvingDepth" ) );
+		var RiverCarvingDepthFloat = riverPage.Layout.Add( FloatSlider( nameof( RiverCarvingDepth ) ) );
+		var RiverCarvingWidthLabel = riverPage.Layout.Add( new Label( "RiverCarvingWidth" ) );
+		var RiverCarvingWidthFloat = riverPage.Layout.Add( FloatSlider( nameof( RiverCarvingWidth ) ) );
+		var RiverCarvingSpacingLabel = riverPage.Layout.Add( new Label( "RiverCarvingSpacing" ) );
+		var RiverCarvingSpacingFloat = riverPage.Layout.Add( FloatSlider( nameof( RiverCarvingSpacing ) ) );
+		var RiverCarvingTurbulenceStrengthLabel = riverPage.Layout.Add( new Label( "RiverCarvingTurbulenceStrength" ) );
+		var RiverCarvingTurbulenceStrengthFloat = riverPage.Layout.Add( FloatSlider( nameof( RiverCarvingTurbulenceStrength ) ) );
+		var RiverCarvingTurbulenceFrequencyLabel = riverPage.Layout.Add( new Label( "RiverCarvingTurbulenceFrequency" ) );
+		var RiverCarvingTurbulenceFrequencyFloat = riverPage.Layout.Add( FloatSlider( nameof( RiverCarvingTurbulenceFrequency ) ) );
+		_riverCarvingWidgets.AddRange( new Widget[]
+		{
+			RiverCarvingFrequencyLabel, RiverCarvingFrequencyFloat,
+			/*RiverCarvingStrength, RiverCarvingStrengthFloat,*/
+			RiverCarvingDepthLabel, RiverCarvingDepthFloat,
+			RiverCarvingWidthLabel, RiverCarvingWidthFloat,
+			RiverCarvingSpacingLabel, RiverCarvingSpacingFloat,
+			RiverCarvingTurbulenceStrengthLabel, RiverCarvingTurbulenceStrengthFloat,
+			RiverCarvingTurbulenceFrequencyLabel, RiverCarvingTurbulenceFrequencyFloat
+		} );
+		AddPropsTab( "River", "water", riverPage, "River carving options" );
+
+		// --- Staging tab ---
+		var stagingPage = CreatePropsPage();
+
+		stagingPage.Layout.Add( new Label( "Staging Area" ) );
+		stagingPage.Layout.Add( new BoolControlWidget( _serialized.GetProperty( nameof( StagingArea ) ) ) );
+		var StagingAreaSizeLabel = stagingPage.Layout.Add( new Label( "Staging Area (Size)" ) );
+		var StagingAreaSizeFloat = stagingPage.Layout.Add( IntSlider( nameof( StagingAreaSize ) ) );
+		var StagingAreaHeightLabel = stagingPage.Layout.Add( new Label( "Staging Area (Height)" ) );
+		var StagingAreaHeightFloat = stagingPage.Layout.Add( FloatSlider( nameof( StagingAreaHeight ) ) );
+		var StagingAreaXLabel = stagingPage.Layout.Add( new Label( "Staging Area (X)" ) );
+		var StagingAreaXFloat = stagingPage.Layout.Add( FloatSlider( nameof( StagingAreaX ) ) );
+		var StagingAreaYLabel = stagingPage.Layout.Add( new Label( "Staging Area (Y)" ) );
+		var StagingAreaYFloat = stagingPage.Layout.Add( FloatSlider( nameof( StagingAreaY ) ) );
+		_stagingAreaWidgets.AddRange( new Widget[]
+		{
+			StagingAreaSizeLabel, StagingAreaSizeFloat,
+			StagingAreaHeightLabel, StagingAreaHeightFloat,
+			StagingAreaXLabel, StagingAreaXFloat,
+			StagingAreaYLabel, StagingAreaYFloat
+		} );
+		AddPropsTab( "Staging", "square_foot", stagingPage, "Staging area placement" );
 
 		body.AddSpacingCell( 5 );
-		var RiverCarvingLabel = body.Add( new Label( "River Carving" ) );
-		var RiverCarvingBoolControl = body.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingBool ) ) ) );
 
-		if ( RiverCarvingBool )
-		{
-			var RiverCarvingFrequency = body.Add( new Label( "RiverCarvingFrequency" ));
-			var RiverCarvingFrequencyFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( RiverCarvingFrequency ) ) ) );
-			/*var RiverCarvingStrength = body.Add( new Label("RiverCarvingStrength"));
-			var RiverCarvingStrengthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingStrength))));*/
-			var RiverCarvingDepth = body.Add( new Label("RiverCarvingDepth"));
-			var RiverCarvingDepthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingDepth))));
-			var RiverCarvingWidth = body.Add( new Label("RiverCarvingWidth"));
-			var RiverCarvingWidthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingWidth))));
-			var RiverCarvingSpacing = body.Add( new Label("RiverCarvingSpacing"));
-			var RiverCarvingSpacingFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingSpacing))));
-			var RiverCarvingTurbulenceStrength = body.Add( new Label("RiverCarvingTurbulenceStrength"));
-			var RiverCarvingTurbulenceStrengthFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceStrength))));
-			var RiverCarvingTurbulenceFrequency = body.Add( new Label("RiverCarvingTurbulenceFrequency"));
-			var RiverCarvingTurbulenceFrequencyFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty(nameof(RiverCarvingTurbulenceFrequency))));
+		var GenerateButton = body.Add( new Button.Primary( "Generate", "auto_awesome", this ) );
 
-			RiverCarvingBoolControl.MouseClick += () =>
-			{
-				if ( RiverCarvingBool )
-				{
-					RiverCarvingFrequency.Enabled = true;
-					RiverCarvingFrequencyFloat.Enabled = true;
-					/*RiverCarvingStrength.Enabled = true;
-					RiverCarvingStrengthFloat.Enabled = true;*/
-					RiverCarvingDepth.Enabled = true;
-					RiverCarvingDepthFloat.Enabled = true;
-					RiverCarvingWidth.Enabled = true;
-					RiverCarvingWidthFloat.Enabled = true;
-					RiverCarvingSpacing.Enabled = true;
-					RiverCarvingSpacingFloat.Enabled = true;
-					RiverCarvingTurbulenceStrength.Enabled = true;
-					RiverCarvingTurbulenceStrengthFloat.Enabled = true;
-					RiverCarvingTurbulenceFrequency.Enabled = true;
-					RiverCarvingTurbulenceFrequencyFloat.Enabled = true;
-					RiverCarvingFrequency.Visible = true;
-					RiverCarvingFrequencyFloat.Visible = true;
-					/*RiverCarvingStrength.Visible = true;
-					RiverCarvingStrengthFloat.Visible = true;*/
-					RiverCarvingDepth.Visible = true;
-					RiverCarvingDepthFloat.Visible = true;
-					RiverCarvingWidth.Visible = true;
-					RiverCarvingWidthFloat.Visible = true;
-					RiverCarvingSpacing.Visible = true;
-					RiverCarvingSpacingFloat.Visible = true;
-					RiverCarvingTurbulenceStrength.Visible = true;
-					RiverCarvingTurbulenceStrengthFloat.Visible = true;
-					RiverCarvingTurbulenceFrequency.Visible = true;
-					RiverCarvingTurbulenceFrequencyFloat.Visible = true;
-				}
-				else
-				{
-					RiverCarvingFrequency.Enabled = false;
-					RiverCarvingFrequencyFloat.Enabled = false;
-					/*RiverCarvingStrength.Enabled = false;
-					RiverCarvingStrengthFloat.Enabled = false;*/
-					RiverCarvingDepth.Enabled = false;
-					RiverCarvingDepthFloat.Enabled = false;
-					RiverCarvingWidth.Enabled = false;
-					RiverCarvingWidthFloat.Enabled = false;
-					RiverCarvingSpacing.Enabled = false;
-					RiverCarvingSpacingFloat.Enabled = false;
-					RiverCarvingTurbulenceStrength.Enabled = false;
-					RiverCarvingTurbulenceStrengthFloat.Enabled = false;
-					RiverCarvingTurbulenceFrequency.Enabled = false;
-					RiverCarvingTurbulenceFrequencyFloat.Enabled = false;
-
-					RiverCarvingFrequency.Visible = false;
-					RiverCarvingFrequencyFloat.Visible = false;
-					/*RiverCarvingStrength.Visible = false;
-					RiverCarvingStrengthFloat.Visible = false;*/
-					RiverCarvingDepth.Visible = false;
-					RiverCarvingDepthFloat.Visible = false;
-					RiverCarvingWidth.Visible = false;
-					RiverCarvingWidthFloat.Visible = false;
-					RiverCarvingSpacing.Visible = false;
-					RiverCarvingSpacingFloat.Visible = false;
-					RiverCarvingTurbulenceStrength.Visible = false;
-					RiverCarvingTurbulenceStrengthFloat.Visible = false;
-					RiverCarvingTurbulenceFrequency.Visible = false;
-					RiverCarvingTurbulenceFrequencyFloat.Visible = false;
-				}
-			};
-		}
-		else
-		{
-			//RiverStreamCarving = !RiverStreamCarving;
-		}
-		body.AddSpacingCell( 5 );
-		var ToolPlacementLabel = body.Add( new Label( "Staging Area" ) );
-		var ToolPlacementBool = body.Add( new BoolControlWidget( this.GetSerialized().GetProperty( nameof( StagingArea ) ) ) );
-		if ( StagingArea )
-		{
-			var StagingAreaSizeLabel = body.Add( new Label( "Staging Area (Size)" ) );
-			var StagingAreaSizeFloat = body.Add( new IntegerControlWidget( this.GetSerialized().GetProperty( nameof( StagingAreaSize ) ) ) );
-			var StagingAreaHeightLabel = body.Add( new Label( "Staging Area (Height)" ) );
-			var StagingAreaHeightFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( StagingAreaHeight ) ) ) );
-			var StagingAreaXLabel = body.Add( new Label( "Staging Area (X)" ) );
-			var StagingAreaXFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( StagingAreaX ) ) ) );
-			var StagingAreaYLabel = body.Add( new Label( "Staging Area (Y)" ) );
-			var StagingAreaYFloat = body.Add( new FloatControlWidget( this.GetSerialized().GetProperty( nameof( StagingAreaY ) ) ) );
-			ToolPlacementBool.MouseClick += () =>
-			{
-				if ( StagingArea )
-				{
-					StagingAreaSizeLabel.Enabled = true;
-					StagingAreaSizeFloat.Enabled = true;
-					StagingAreaHeightLabel.Enabled = true;
-					StagingAreaHeightFloat.Enabled = true;
-					StagingAreaXLabel.Enabled = true;
-					StagingAreaXFloat.Enabled = true;
-					StagingAreaYLabel.Enabled = true;
-					StagingAreaYFloat.Enabled = true;
-					StagingAreaSizeLabel.Visible = true;
-					StagingAreaSizeFloat.Visible = true;
-					StagingAreaHeightLabel.Visible = true;
-					StagingAreaHeightFloat.Visible = true;
-					StagingAreaXLabel.Visible = true;
-					StagingAreaXFloat.Visible = true;
-					StagingAreaYLabel.Visible = true;
-					StagingAreaYFloat.Visible = true;
-				}
-				else
-				{
-					StagingAreaSizeLabel.Enabled = false;
-					StagingAreaSizeFloat.Enabled = false;
-					StagingAreaHeightLabel.Enabled = false;
-					StagingAreaHeightFloat.Enabled = false;
-					StagingAreaXLabel.Enabled = false;
-					StagingAreaXFloat.Enabled = false;
-					StagingAreaYLabel.Enabled = false;
-					StagingAreaYFloat.Enabled = false;
-					StagingAreaSizeLabel.Visible = false;
-					StagingAreaSizeFloat.Visible = false;
-					StagingAreaHeightLabel.Visible = false;
-					StagingAreaHeightFloat.Visible = false;
-					StagingAreaXLabel.Visible = false;
-					StagingAreaXFloat.Visible = false;
-					StagingAreaYLabel.Visible = false;
-					StagingAreaYFloat.Visible = false;
-				}
-			};
-		}
-
-		var GenerateButton = Layout.Add( new Button.Primary( "Generate", "auto_awesome", this ) );
-
-		var LayoutRow = Layout.AddRow( 1 );
-		//var PreviewLabel = Layout.Add( new Label( "Preview" ) ); //Will attempt to get this working in a future update.
-		var _image_preview = new Editor.TextureWidget();
-		_image_preview.Texture = _preview_image_texture;
-		_image_preview.Size = new Vector2( 512, 512 );
-		PreviewImage = LayoutRow.Add( _image_preview, 50 );
-
-		var _splatmap_preview = new Editor.TextureWidget();
-		_splatmap_preview.Texture = _preview_splatmap_texture;
-		_splatmap_preview.Size = new Vector2( 512, 512 );
-		PreviewSplatmap = LayoutRow.Add( _splatmap_preview, 50 );
-
-		/*RenderCanvas = new SceneRenderingWidget( this );
-		RenderCanvas.OnPreFrame += OnPreFrame;
-		RenderCanvas.FocusMode = FocusMode.Click;
-		RenderCanvas.Scene = Scene.CreateEditorScene();
-		RenderCanvas.Scene.SceneWorld.AmbientLightColor = Theme.Blue * 0.4f;
-		_terrain = new GameObject( RenderCanvas.Scene,true, "terrain" ).GetOrAddComponent<Terrain>( true );
-		//_terrain.Storage.SetResolution( 512 );
-		_terrain.TerrainSize = 5007;
-		_terrain.TerrainHeight = 1000;
-		using ( RenderCanvas.Scene.Push() )
-		{
-			Camera = new GameObject( true, "camera" ).GetOrAddComponent<CameraComponent>( false );
-			Camera.BackgroundColor = Theme.Grey;
-			Camera.ZFar = 100000;
-			Camera.Enabled = true;
-			Camera.WorldPosition = new Vector3( -2000, 0, 2000 );
-			Camera.LocalRotation = new Angles( 30, 0, 0 );
-			RenderCanvas.Camera = Camera;
-		}
-
-		GizmoInstance = RenderCanvas.GizmoInstance;
-		Layout.Add( RenderCanvas,1 ); //Will attempt to get this working in a future update.*/
-
-		var ExportButton = Layout.Add( new Button( "Export", "file_download", this ) );
+		var ExportButton = body.Add( new Button( "Export", "file_download", this ) );
 		ExportButton.Tint = "#41AF20";
 
-		var ApplyButton = Layout.Add( new Button( "Apply To Terrain", "file_upload", this ) );
+		var ApplyButton = body.Add( new Button( "Apply To Terrain", "file_upload", this ) );
 		ApplyButton.Tint = "#AF2020";
 
 		if ( _heightmap == null )
@@ -562,88 +532,28 @@ public class TerrainGenerationTool : Widget
 
 		GenerateButton.Clicked += () =>
 		{
-			List<float> _splatthresholdtime = new List<float>();
-			List<SKColor> _splatmapgradients = new List<SKColor>();
-			foreach ( var color in SplatMapGradient.Colors )
-			{
-				_splatthresholdtime.Add( color.Time );
-				_splatmapgradients.Add( new SKColor( color.Value.ToColor32().r, color.Value.ToColor32().g, color.Value.ToColor32().b, color.Value.ToColor32().a ) );
-			}
-			_splatthresholds = _splatthresholdtime.ToArray();
-			_splatcolors = _splatmapgradients.ToArray();
+			BuildSplatColors();
 
-			var fullclass = Type.GetType($"Sturnus.TerrainGenerationTool.{CategoryArray.Selected}");
-			Log.Info( fullclass.ToString() );
-			var fullclassmethod = fullclass.GetMethod(ShapeArray.Selected);
-			Log.Info( fullclassmethod.ToString() );
-			_heightmap = GenerateStackedNoise(
-				(int)TerrainDimensionsEnum,
-				(int)TerrainDimensionsEnum,
-				TerrainSeed,
-				NoiseLayerStacks,
-				1.0f,
-				2.0f,
-				1.0f,
-				0.5f,
-				( x, y ) => (float)CallMethod( $"Sturnus.TerrainGenerationTool.{CategoryArray.Selected}", ShapeArray.Selected, new object[] {
-				x, y,
-				(int)TerrainDimensionsEnum,
-				(int)TerrainDimensionsEnum,
-				TerrainSeed,
-				TerrainMinHeight,
-				DomainWarping,
-				DomainWarpingSize,
-				DomainWarpingStrength
-				} ),
-				TerrainMaxHeight,
-				SmoothingPasses,
-				TerrainPlaneScale
-			);
-			
-			if ( ErosionSimulation )
-			{
-
-			}
-
-			if ( RiverCarvingBool )
-			{
-				_heightmap = AddTurbulenceForRivers(
-				_heightmap,
-				seed: TerrainSeed,
-				riverFrequency: RiverCarvingFrequency, // Frequency of rivers
-				riverWidth: RiverCarvingWidth, // Width of rivers
-				riverDepth: RiverCarvingDepth, // Depth of rivers
-				turbulenceFrequency: RiverCarvingTurbulenceFrequency, // Turbulence frequency
-				turbulenceStrength: RiverCarvingTurbulenceStrength, // Turbulence strength
-				minRiverSpacing: RiverCarvingSpacing, // Minimum spacing between rivers
-				slopeSteepness:10f,
-				terrainNoiseFrequency: 2.0f, // Matches terrain noise frequency
-				terrainNoiseAmplitude: 0.5f // Matches terrain noise amplitude
-			);
-			}
-
-
+			int fullRes = (int)TerrainDimensionsEnum;
+			_heightmap = BuildHeightmap(
+				fullRes, fullRes,
+				CategoryArray.Selected, ShapeArray.Selected,
+				TerrainSeed, NoiseLayerStacks, TerrainMinHeight, TerrainMaxHeight,
+				DomainWarping, DomainWarpingSize, DomainWarpingStrength,
+				SmoothingPasses, TerrainPlaneScale,
+				RiverCarvingBool, RiverCarvingFrequency, RiverCarvingWidth, RiverCarvingDepth,
+				RiverCarvingTurbulenceFrequency, RiverCarvingTurbulenceStrength, RiverCarvingSpacing,
+				StagingArea, StagingAreaSize, StagingAreaHeight, StagingAreaX, StagingAreaY );
 			if ( _heightmap == null )
 			{
 				Log.Error( "Heightmap is not generated. Aborting." );
 				return;
 			}
 
-			if ( StagingArea )
-			{
-				_heightmap = AddStagingSquare(
-				_heightmap,
-				StagingAreaSize,
-				StagingAreaHeight,
-				StagingAreaX,
-				StagingAreaY );
-			}
-
-			_splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
+			_splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
 
 			GeneratePreviewFile( GenerationPath );
 
-			//_terrain.HeightMap.Update( _heightmap_byte ,0,0, (int)TerrainDimensionsEnum , (int)TerrainDimensionsEnum );
 			BaseFileSystem fileSystem = Editor.FileSystem.Mounted;
 			string preview_image_path = Path.Combine( GenerationLocalPath, $"TerrainGenerationUtility_preview.png" );
 			_preview_image_texture = Texture.LoadFromFileSystem( preview_image_path, fileSystem );
@@ -655,6 +565,8 @@ public class TerrainGenerationTool : Widget
 
 			ExportButton.Enabled = true;
 			ApplyButton.Enabled = true;
+
+			UpdatePreviewTerrain( _heightmap );
 
 		};
 
@@ -673,14 +585,945 @@ public class TerrainGenerationTool : Widget
 			PopUpWarn.Show();
 		};
 		
-		Layout.AddStretchCell();
+		body.AddStretchCell();
+
+		// ---------- Right: tabbed preview panel ----------
+		var rightPanel = Layout.Add( new Widget( null ), 1 );
+		rightPanel.Layout = Layout.Column();
+		rightPanel.Layout.Spacing = 0;
+
+		var PreviewTabs = rightPanel.Layout.Add( new VerticalTabWidget( this ), 1 );
+		PreviewTabs.StateCookie = "TerrainGenerationTool.PreviewTabs";
+
+		RenderCanvas = new SceneRenderingWidget( this );
+		RenderCanvas.OnPreFrame += OnPreFrame;
+		RenderCanvas.FocusMode = FocusMode.Click;
+		RenderCanvas.Scene = Scene.CreateEditorScene();
+		RenderCanvas.Scene.SceneWorld.AmbientLightColor = Color.FromBytes( 135, 206, 235 ) * 0.45f;
+
+		// 3D preview tab
+		PreviewTabs.AddPage( "3D Preview", "landscape", RenderCanvas, "3D terrain preview" );
+
+		// Height/Color maps tab
+		var mapsPage = new Widget( null );
+		mapsPage.Layout = Layout.Row();
+		mapsPage.Layout.Spacing = 5;
+
+		var _image_preview = new Editor.TextureWidget();
+		_image_preview.Texture = _preview_image_texture;
+		_image_preview.Size = new Vector2( 512, 512 );
+		PreviewImage = mapsPage.Layout.Add( _image_preview, 50 );
+
+		var _splatmap_preview = new Editor.TextureWidget();
+		_splatmap_preview.Texture = _preview_splatmap_texture;
+		_splatmap_preview.Size = new Vector2( 512, 512 );
+		PreviewSplatmap = mapsPage.Layout.Add( _splatmap_preview, 50 );
+
+		PreviewTabs.AddPage( "Height/Color Maps", "grid_view", mapsPage, "Heightmap and splatmap preview" );
+
+		using ( RenderCanvas.Scene.Push() )
+		{
+			Camera = new GameObject( true, "camera" ).GetOrAddComponent<CameraComponent>( false );
+			Camera.BackgroundColor = Color.FromBytes( 135, 206, 235 );
+			Camera.ZFar = 100000;
+			Camera.Enabled = true;
+			PositionCameraForOrbit();
+			RenderCanvas.Camera = Camera;
+
+			var sun = new GameObject( true, "sun" ).GetOrAddComponent<DirectionalLight>( false );
+			sun.WorldRotation = Rotation.From( 45, 45, 0 );
+			sun.LightColor = Color.White;
+			sun.SkyColor = Color.FromBytes( 135, 206, 235 );
+			sun.Enabled = true;
+
+			var sun2 = new GameObject( true, "sun2" ).GetOrAddComponent<DirectionalLight>( false );
+			sun2.WorldRotation = Rotation.From( -30, 135, 0 );
+			sun2.LightColor = Color.White * 0.3f;
+			sun2.SkyColor = Color.FromBytes( 135, 206, 235 );
+			sun2.Enabled = true;
+		}
+
+		GizmoInstance = RenderCanvas.GizmoInstance;
+
+		// Create the preview terrain renderer
+		using ( RenderCanvas.Scene.Push() )
+		{
+			_previewGO = new GameObject( true, "terrain preview" );
+			_previewRenderer = _previewGO.AddComponent<ModelRenderer>();
+			_previewRenderer.MaterialOverride = Material.Load( "materials/default/vertex_color.vmat" );
+		}
+
+		// Zoom slider at the bottom of the preview panel
+		var zoomRow = rightPanel.Layout.AddRow();
+		zoomRow.Margin = new Sandbox.UI.Margin( 8, 4, 8, 6 );
+		zoomRow.Spacing = 8;
+
+		zoomRow.Add( new IconButton( "zoom_out", () => ZoomSlider.Value = MathF.Max( ZoomSlider.Minimum, ZoomSlider.Value - 100f ), this ) { IconSize = 16, FixedSize = new Vector2( 22, 22 ) } );
+		ZoomSlider = zoomRow.Add( new FloatSlider( this ), 1 );
+		ZoomSlider.Minimum = 2000f;
+		ZoomSlider.Maximum = 9000f;
+		ZoomSlider.Step = 100f;
+		ZoomSlider.Value = 9000f - _orbitDistance + 2000f;
+		ZoomSlider.OnValueEdited = UpdateOrbitFromZoom;
+		zoomRow.Add( new IconButton( "zoom_in", () => ZoomSlider.Value = MathF.Min( ZoomSlider.Maximum, ZoomSlider.Value + 100f ), this ) { IconSize = 16, FixedSize = new Vector2( 22, 22 ) } );
+
+		ApplyConditionalVisibility();
+		LoadFacepunchMaterialsAsync();
+		RegeneratePreview();
 		Show();
+	}
+
+	void OnSerializedPropertyChanged( SerializedProperty prop )
+	{
+		_previewDirty = true;
+
+		if ( prop is null ) return;
+
+		switch ( prop.Name )
+		{
+			case nameof( DomainWarping ):
+				SetWidgetsVisible( _domainWarpingWidgets, DomainWarping );
+				break;
+			case nameof( RiverCarvingBool ):
+				SetWidgetsVisible( _riverCarvingWidgets, RiverCarvingBool );
+				break;
+			case nameof( StagingArea ):
+				SetWidgetsVisible( _stagingAreaWidgets, StagingArea );
+				break;
+			case nameof( SplatLayerCount ):
+			case nameof( SplatDispersion ):
+				// Resample the gradient into evenly spaced stops so the colors/thresholds match the layer count
+				ResampleSplatGradient();
+				if ( PreviewSplatMaterials )
+				{
+					_previewMaterialPixels = null;
+					RandomizeMaterialsAsync();
+				}
+				break;
+			case nameof( PreviewSplatMaterials ):
+				if ( PreviewSplatMaterials && ( _previewMaterialPixels == null || _previewMaterialPixels.Length < Math.Max( SplatLayerCount, 2 ) ) )
+				{
+					RandomizeMaterials();
+				}
+				if ( !PreviewSplatMaterials )
+				{
+					_previewMaterials = null;
+					_previewMaterialAlbedo = null;
+					_previewMaterialPixels = null;
+					_previewMaterialWidths = null;
+					_previewMaterialHeights = null;
+					_previewMaterialUvScales = null;
+				}
+				break;
+		}
+	}
+
+	void ResampleSplatGradient()
+	{
+		int layerCount = Math.Max( SplatLayerCount, 2 );
+
+		// Keep the user's existing color stops, trim or extend to the requested layer count.
+		var existing = SplatMapGradient.Colors.ToList();
+
+		var colors = new List<Color>();
+		for ( int i = 0; i < layerCount; i++ )
+		{
+			if ( i < existing.Count )
+			{
+				colors.Add( existing[i].Value );
+			}
+			else
+			{
+				// New layers get a random bright color
+				colors.Add( RandomBrightColor() );
+			}
+		}
+
+		// Position the color stops according to the dispersion mode so the gradient
+		// visually reflects how the layers are spread across the height range.
+		float[] thresholds;
+		var source = _previewHeightmap ?? _heightmap;
+		if ( SplatDispersion == SplatDispersionMode.Natural && source != null )
+		{
+			thresholds = ComputeNaturalThresholds( source, layerCount );
+		}
+		else
+		{
+			thresholds = new float[layerCount];
+			for ( int i = 0; i < layerCount; i++ )
+			{
+				thresholds[i] = (float)i / (layerCount - 1);
+			}
+		}
+		_splatthresholds = thresholds;
+
+		var frames = new Gradient.ColorFrame[layerCount];
+		for ( int i = 0; i < layerCount; i++ )
+		{
+			frames[i] = new Gradient.ColorFrame( thresholds[i], colors[i] );
+		}
+
+		SplatMapGradient = new Gradient( frames );
+		SplatMapGradient.Blending = Gradient.BlendMode.Stepped;
+
+		_serialized.GetProperty( nameof( SplatMapGradient ) )?.SetValue( SplatMapGradient );
+	}
+
+	static Color RandomBrightColor()
+	{
+		// Pick a hue at random, keep saturation/value high so it stands out
+		float hue = Random.Shared.NextSingle() * 360f;
+		return new ColorHsv( hue, 0.8f, 1.0f ).ToColor();
+	}
+
+	void SetWidgetsVisible( List<Widget> widgets, bool visible )
+	{
+		foreach ( var widget in widgets )
+		{
+			widget.Visible = visible;
+			widget.Enabled = visible;
+		}
+	}
+
+	Widget CreatePropsPage()
+	{
+		var page = new Widget( null );
+		page.VerticalSizeMode = SizeMode.CanShrink;
+		page.HorizontalSizeMode = SizeMode.Flexible;
+		page.Layout = Layout.Column();
+		page.Layout.Margin = 10;
+		page.Layout.Spacing = 5;
+		page.Layout.Alignment = TextFlag.Top;
+		return page;
+	}
+
+	FloatControlWidget FloatSlider( string propertyName )
+	{
+		var property = _serialized.GetProperty( propertyName );
+		var control = new FloatControlWidget( property );
+		MakeRanged( control, property );
+		return control;
+	}
+
+	IntegerControlWidget IntSlider( string propertyName )
+	{
+		var property = _serialized.GetProperty( propertyName );
+		var control = new IntegerControlWidget( property );
+		MakeRanged( control, property );
+		return control;
+	}
+
+	void MakeRanged( FloatControlWidget control, SerializedProperty property )
+	{
+		if ( property is null ) return;
+
+		property.TryGetAttribute<MinMaxAttribute>( out var minMax );
+		if ( minMax is null ) return;
+
+		float step = 0.01f;
+		if ( property.TryGetAttribute<StepAttribute>( out var stepAttr ) )
+		{
+			step = stepAttr.Step;
+		}
+
+		control.MakeRanged( new Vector2( minMax.MinValue, minMax.MaxValue ), step, true, true );
+	}
+
+	void RandomizeSeed()
+	{
+		var property = _serialized.GetProperty( nameof( TerrainSeed ) );
+		if ( property is null ) return;
+
+		TerrainSeed = Random.Shared.NextInt64();
+		property.SetValue( TerrainSeed );
+		_previewDirty = true;
+	}
+
+	async void LoadFacepunchMaterialsAsync()
+	{
+		try
+		{
+			var result = await Package.FindAsync( "org:facepunch type:tmat sort:popular", 60, 0 );
+			_facepunchTmatIdents = result.Packages
+				.Where( p => p is not null && !string.IsNullOrEmpty( p.FullIdent ) )
+				.Select( p => p.FullIdent )
+				.ToList();
+		}
+		catch ( System.Exception e )
+		{
+			Log.Error( $"Failed to load cloud terrain materials: {e.Message}" );
+		}
+	}
+
+	void RandomizeMaterials()
+	{
+		if ( !PreviewSplatMaterials ) return;
+
+		if ( _facepunchTmatIdents is null || _facepunchTmatIdents.Count == 0 )
+		{
+			// Fetch the facepunch tmat list first, then randomize once it's available
+			_ = LoadFacepunchMaterialsAndRandomize();
+			return;
+		}
+
+		RandomizeMaterialsAsync();
+	}
+
+	async Task LoadFacepunchMaterialsAndRandomize()
+	{
+		try
+		{
+			var result = await Package.FindAsync( "org:facepunch type:tmat sort:popular", 60, 0 );
+			_facepunchTmatIdents = result.Packages
+				.Where( p => p is not null && !string.IsNullOrEmpty( p.FullIdent ) )
+				.Select( p => p.FullIdent )
+				.ToList();
+
+			if ( PreviewSplatMaterials && _facepunchTmatIdents.Count > 0 )
+				RandomizeMaterialsAsync();
+		}
+		catch ( System.Exception e )
+		{
+			Log.Error( $"Failed to load cloud terrain materials: {e.Message}" );
+		}
+	}
+
+	async void RandomizeMaterialsAsync()
+	{
+		if ( _materialLoadingLabel != null )
+		{
+			_materialLoadingLabel.Text = "Loading materials...";
+			_materialLoadingLabel.Visible = true;
+		}
+
+		int layerCount = Math.Max( SplatLayerCount, 2 );
+		int gen = ++_previewMaterialsGeneration;
+
+		try
+		{
+			var picked = new List<string>();
+			var pool = new List<string>( _facepunchTmatIdents );
+			for ( int i = 0; i < layerCount && pool.Count > 0; i++ )
+			{
+				int idx = Random.Shared.Next( pool.Count );
+				picked.Add( pool[idx] );
+				pool.RemoveAt( idx );
+			}
+
+			var materials = new List<TerrainMaterial>();
+			var albedo = new List<Texture>();
+			var uvScales = new List<float>();
+			var pixels = new List<Color32[]>();
+			var widths = new List<int>();
+			var heights = new List<int>();
+
+			foreach ( var ident in picked )
+			{
+				var asset = await Editor.AssetSystem.InstallAsync( ident );
+				if ( asset is null )
+				{
+					Log.Warning( $"Install returned null for '{ident}'" );
+					continue;
+				}
+
+				// The cloud tmat packages compile into generated BCR/NHO textures. The primary
+				// asset is the tmat itself - its BCR texture (albedo RGB + roughness A) is what
+				// we render for the material preview.
+				float uvScale = 4f;
+
+				if ( asset.TryLoadResource<TerrainMaterial>( out var material ) )
+				{
+					uvScale = material.UVScale > 0 ? material.UVScale : 4f;
+				}
+
+				var tex = LoadTmatBcrTexture( asset.Path );
+				if ( tex is null || tex.IsError || !tex.IsValid )
+				{
+					Log.Warning( $"BCR texture for '{ident}' ('{asset.Path}') failed to load" );
+					continue;
+				}
+
+				materials.Add( null );
+				albedo.Add( tex );
+				uvScales.Add( uvScale );
+				pixels.Add( tex.GetPixels() );
+				widths.Add( tex.Width );
+				heights.Add( tex.Height );
+			}
+
+			if ( gen != _previewMaterialsGeneration ) return;
+
+			if ( materials.Count == 0 )
+			{
+				_previewMaterials = null;
+				_previewMaterialAlbedo = null;
+				_previewMaterialPixels = null;
+				_previewMaterialWidths = null;
+				_previewMaterialHeights = null;
+				_previewMaterialUvScales = null;
+				Log.Warning( "No facepunch terrain materials could be loaded" );
+			}
+			else
+			{
+				_previewMaterials = materials.ToArray();
+				_previewMaterialAlbedo = albedo.ToArray();
+				_previewMaterialPixels = pixels.ToArray();
+				_previewMaterialWidths = widths.ToArray();
+				_previewMaterialHeights = heights.ToArray();
+				_previewMaterialUvScales = uvScales.ToArray();
+			}
+
+			_previewDirty = true;
+		}
+		catch ( System.Exception e )
+		{
+			Log.Error( $"Failed to load preview materials: {e.Message}" );
+		}
+		finally
+		{
+			if ( gen == _previewMaterialsGeneration && _materialLoadingLabel != null )
+				_materialLoadingLabel.Visible = false;
+		}
+	}
+
+	Texture LoadTmatBcrTexture( string tmatPath )
+	{
+		if ( string.IsNullOrEmpty( tmatPath ) ) return null;
+
+		// The compiled BCR texture is named "<tmat-without-ext>_tmat_bcr.generated.vtex"
+		string stem = tmatPath.Replace( '\\', '/' );
+		int dot = stem.LastIndexOf( '.' );
+		if ( dot > 0 ) stem = stem.Substring( 0, dot );
+
+		string bcrPath = $"{stem}_tmat_bcr.generated.vtex";
+
+		var tex = Texture.Load( bcrPath, false );
+		if ( tex != null && !tex.IsError && tex.IsValid ) return tex;
+
+		// Fall back to scanning the asset system for the tmat's generated BCR texture
+		string stemName = Path.GetFileNameWithoutExtension( stem ).ToLowerInvariant();
+		foreach ( var a in Editor.AssetSystem.All )
+		{
+			if ( a is null || a.IsDeleted ) continue;
+			if ( a.AssetType is null || (a.AssetType.FileExtension ?? "") != "vtex" ) continue;
+
+			var name = Path.GetFileNameWithoutExtension( a.RelativePath ?? "" ).ToLowerInvariant();
+			if ( !name.Contains( "tmat_bcr", StringComparison.Ordinal ) ) continue;
+			if ( !name.Contains( stemName, StringComparison.Ordinal ) ) continue;
+
+			var t = Texture.Load( a.Path, false );
+			if ( t != null && !t.IsError && t.IsValid ) return t;
+		}
+
+		return null;
+	}
+
+	void AddPropsTab( string name, string icon, Widget page, string tooltip )
+	{
+		_propsTabBar.AddOption( name, icon );
+		_propsPages[name] = page;
+		_propsContent.Layout.Add( page );
+
+		page.Visible = false;
+		page.ToolTip = tooltip;
+
+		if ( _propsPages.Count == 1 )
+		{
+			SelectPropsTab( name );
+		}
+	}
+
+	void SelectPropsTab( string name )
+	{
+		foreach ( var entry in _propsPages )
+		{
+			entry.Value.Visible = entry.Key == name;
+		}
+
+		if ( _activePropsTab != name )
+		{
+			_activePropsTab = name;
+			_previewDirty = true;
+		}
+	}
+
+	void ApplyConditionalVisibility()
+	{
+		SetWidgetsVisible( _domainWarpingWidgets, DomainWarping );
+		SetWidgetsVisible( _riverCarvingWidgets, RiverCarvingBool );
+		SetWidgetsVisible( _stagingAreaWidgets, StagingArea );
+	}
+
+	[EditorEvent.Frame]
+	public void FrameUpdate()
+	{
+		if ( !_previewDirty ) return;
+		if ( RealTime.Now - _lastPreviewRegen < 0.1f ) return;
+		if ( _isGenerating ) return;
+
+		_previewDirty = false;
+		_lastPreviewRegen = RealTime.Now;
+
+		RegeneratePreviewAsync();
+	}
+
+	async void RegeneratePreviewAsync()
+	{
+		if ( _previewRenderer is null || !_previewRenderer.IsValid() ) return;
+		if ( string.IsNullOrEmpty( CategoryArray?.Selected ) || string.IsNullOrEmpty( ShapeArray?.Selected ) ) return;
+
+		if ( _isGenerating ) return;
+		_isGenerating = true;
+		int token = ++_generationToken;
+
+		// Splat colors are read on the main thread into the shared arrays
+		BuildSplatColors();
+
+		// Snapshot UI-driven values on the main thread so the background task doesn't touch widgets
+		string category = CategoryArray.Selected;
+		string shape = ShapeArray.Selected;
+		long seed = TerrainSeed;
+		int noiseLayers = NoiseLayerStacks;
+		float minHeight = TerrainMinHeight;
+		float maxHeight = TerrainMaxHeight;
+		bool warp = DomainWarping;
+		float warpSize = DomainWarpingSize;
+		float warpStrength = DomainWarpingStrength;
+		int smoothing = SmoothingPasses;
+		float planeScale = TerrainPlaneScale;
+		bool rivers = RiverCarvingBool;
+		float riverFrequency = RiverCarvingFrequency;
+		float riverWidth = RiverCarvingWidth;
+		float riverDepth = RiverCarvingDepth;
+		float riverTurbFreq = RiverCarvingTurbulenceFrequency;
+		float riverTurbStrength = RiverCarvingTurbulenceStrength;
+		float riverSpacing = RiverCarvingSpacing;
+		bool staging = StagingArea;
+		int stagingSize = StagingAreaSize;
+		float stagingHeight = StagingAreaHeight;
+		float stagingX = StagingAreaX;
+		float stagingY = StagingAreaY;
+
+		try
+		{
+			// CPU-heavy work (noise, smoothing, rivers, splatmap) runs off the main thread
+			float[,] heightmap = await Task.Run( () => BuildHeightmap(
+				PreviewResolution, PreviewResolution,
+				category, shape,
+				seed, noiseLayers, minHeight, maxHeight,
+				warp, warpSize, warpStrength,
+				smoothing, planeScale,
+				rivers, riverFrequency, riverWidth, riverDepth,
+				riverTurbFreq, riverTurbStrength, riverSpacing,
+				staging, stagingSize, stagingHeight, stagingX, stagingY ) );
+
+			if ( token != _generationToken ) return;
+			if ( heightmap is null ) return;
+
+			_previewHeightmap = heightmap;
+
+			// GPU/scene updates must happen back on the main thread
+			UpdatePreviewTerrain( heightmap );
+		}
+		finally
+		{
+			_isGenerating = false;
+
+			// If more changes came in while we were busy, regenerate again
+			if ( _previewDirty && token == _generationToken )
+			{
+				_previewDirty = false;
+				RegeneratePreviewAsync();
+			}
+		}
+	}
+
+	void OnPreFrame()
+	{
+		GizmoInstance.Input.IsHovered = IsActiveWindow && RenderCanvas.IsUnderMouse;
+
+		var isAltHeld = Editor.Application.KeyboardModifiers.HasFlag( KeyboardModifiers.Alt );
+		var isLeftDown = Editor.Application.MouseButtons.HasFlag( MouseButtons.Left );
+
+		var isInteracting = false;
+
+		if ( GizmoInstance.OrbitCamera( Camera, RenderCanvas, ref _orbitDistance ) )
+		{
+			// User is manually orbiting - don't auto-spin this frame
+			isInteracting = true;
+			GizmoInstance.Input.IsHovered = false;
+		}
+		else if ( isAltHeld )
+		{
+			isInteracting = true;
+		}
+		else if ( isLeftDown && GizmoInstance.Input.IsHovered )
+		{
+			// Click and drag in the preview to adjust pitch/yaw
+			isInteracting = true;
+
+			var delta = Editor.Application.CursorDelta * 0.1f;
+
+			_orbitPitch = Math.Clamp( _orbitPitch + delta.y, 5f, 85f );
+			_orbitAngle += delta.x;
+			if ( _orbitAngle >= 360f ) _orbitAngle -= 360f;
+			if ( _orbitAngle < 0f ) _orbitAngle += 360f;
+
+			PositionCameraForOrbit();
+		}
+
+		if ( !isInteracting && _autoSpin )
+		{
+			// Slowly rotate the camera around the terrain
+			_orbitAngle += SpinSpeed * RealTime.Delta;
+			if ( _orbitAngle >= 360f ) _orbitAngle -= 360f;
+			PositionCameraForOrbit();
+		}
+
+		// Scroll wheel over the preview controls zoom
+		if ( !isAltHeld && GizmoInstance.Input.IsHovered && MathF.Abs( Editor.Application.MouseWheelDelta.y ) > 0.001f )
+		{
+			var wheelDelta = Editor.Application.MouseWheelDelta.y;
+			ZoomSlider.Value = Math.Clamp( ZoomSlider.Value + wheelDelta * 100f, ZoomSlider.Minimum, ZoomSlider.Maximum );
+			UpdateOrbitFromZoom();
+		}
+
+		RenderCanvas.UpdateGizmoInputs( GizmoInstance.Input.IsHovered );
+	}
+
+	void PositionCameraForOrbit()
+	{
+		if ( Camera is null || !Camera.IsValid() ) return;
+
+		float pitch = _orbitPitch;
+		float yaw = _orbitAngle;
+
+		var offset = new Vector3(
+			MathF.Sin( MathX.DegreeToRadian( yaw ) ) * MathF.Cos( MathX.DegreeToRadian( pitch ) ),
+			MathF.Cos( MathX.DegreeToRadian( yaw ) ) * MathF.Cos( MathX.DegreeToRadian( pitch ) ),
+			MathF.Sin( MathX.DegreeToRadian( pitch ) )
+		) * _orbitDistance;
+
+		Camera.WorldPosition = Vector3.Zero + offset;
+		Camera.WorldRotation = Rotation.LookAt( (Vector3.Zero - offset).Normal, Vector3.Up );
+	}
+
+	void UpdateOrbitFromZoom()
+	{
+		// Higher slider value = closer to terrain (zoom in)
+		_orbitDistance = ZoomSlider.Maximum + ZoomSlider.Minimum - ZoomSlider.Value;
+		PositionCameraForOrbit();
+	}
+
+	void BuildSplatColors()
+	{
+		// Build evenly spaced thresholds and sample the gradient for each layer color
+		int layerCount = Math.Max( SplatLayerCount, 2 );
+
+		var _splatthresholdtime = new List<float>();
+		var _splatmapgradients = new List<SKColor>();
+		for ( int i = 0; i < layerCount; i++ )
+		{
+			float t = layerCount <= 1 ? 0f : (float)i / (layerCount - 1);
+			_splatthresholdtime.Add( t );
+
+			var color = SplatMapGradient.Evaluate( t ).ToColor32();
+			_splatmapgradients.Add( new SKColor( color.r, color.g, color.b, color.a ) );
+		}
+		_splatthresholds = _splatthresholdtime.ToArray();
+		_splatcolors = _splatmapgradients.ToArray();
+	}
+
+	void RegeneratePreview()
+	{
+		if ( _previewRenderer is null || !_previewRenderer.IsValid() ) return;
+		if ( string.IsNullOrEmpty( CategoryArray?.Selected ) || string.IsNullOrEmpty( ShapeArray?.Selected ) ) return;
+
+		BuildSplatColors();
+
+		var heightmap = BuildHeightmap(
+			PreviewResolution, PreviewResolution,
+			CategoryArray.Selected, ShapeArray.Selected,
+			TerrainSeed, NoiseLayerStacks, TerrainMinHeight, TerrainMaxHeight,
+			DomainWarping, DomainWarpingSize, DomainWarpingStrength,
+			SmoothingPasses, TerrainPlaneScale,
+			RiverCarvingBool, RiverCarvingFrequency, RiverCarvingWidth, RiverCarvingDepth,
+			RiverCarvingTurbulenceFrequency, RiverCarvingTurbulenceStrength, RiverCarvingSpacing,
+			StagingArea, StagingAreaSize, StagingAreaHeight, StagingAreaX, StagingAreaY );
+		if ( heightmap is null ) return;
+
+		_previewHeightmap = heightmap;
+		UpdatePreviewTerrain( heightmap );
+	}
+
+	void UpdatePreviewTerrain( float[,] heightmap )
+	{
+		if ( _previewRenderer is null || !_previewRenderer.IsValid() ) return;
+
+		int width = heightmap.GetLength( 0 );
+		int height = heightmap.GetLength( 1 );
+
+		// Build a grid mesh from the heightmap
+		const float worldSize = 5007f;
+		const float worldHeight = 1000f;
+		float cellX = worldSize / width;
+		float cellY = worldSize / height;
+
+		var vertices = new Vertex[width * height];
+		var indices = new List<int>();
+
+		// If the Splat tab is active, preview with splat colors so it matches what would be applied to terrain.
+		bool showSplat = _activePropsTab == "Splat";
+		float[,] previewSplat = null;
+		if ( showSplat )
+		{
+			previewSplat = GenerateSplatmap( heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
+		}
+
+		// When enabled, blend the randomly assigned facepunch material albedos exactly like the splat map blends layers.
+		bool showMaterialBlend = showSplat && PreviewSplatMaterials && _previewMaterialPixels != null;
+
+		// Snapshot the material data so the parallel loop sees one consistent set
+		var blendPixels = showMaterialBlend ? _previewMaterialPixels : null;
+		var blendWidths = showMaterialBlend ? _previewMaterialWidths : null;
+		var blendHeights = showMaterialBlend ? _previewMaterialHeights : null;
+		var blendUvScales = showMaterialBlend ? _previewMaterialUvScales : null;
+
+		Parallel.For( 0, height, y =>
+		{
+			for ( int x = 0; x < width; x++ )
+			{
+				float h = heightmap[x, y];
+
+				Vector3 position = new Vector3( x * cellX - worldSize * 0.5f, y * cellY - worldSize * 0.5f, h * worldHeight );
+
+				// Compute a normal from heightmap gradients
+				float hL = heightmap[Math.Max( x - 1, 0 ), y];
+				float hR = heightmap[Math.Min( x + 1, width - 1 ), y];
+				float hD = heightmap[x, Math.Max( y - 1, 0 )];
+				float hU = heightmap[x, Math.Min( y + 1, height - 1 )];
+
+				float dx = (hR - hL) * worldHeight / (2.0f * cellX);
+				float dy = (hU - hD) * worldHeight / (2.0f * cellY);
+
+				Vector3 normal = new Vector3( -dx, -dy, 1.0f ).Normal;
+
+				Color color;
+				if ( blendPixels != null )
+				{
+					color = SampleMaterialBlend( previewSplat[x, y], position, blendPixels, blendWidths, blendHeights, blendUvScales );
+				}
+				else if ( showSplat )
+				{
+					float layerPos = Math.Clamp( previewSplat[x, y], 0f, SplatLayerCount - 1f );
+					int layer0 = (int)MathF.Floor( layerPos );
+					int layer1 = Math.Min( layer0 + 1, SplatLayerCount - 1 );
+					float t = layerPos - layer0;
+
+					Color c0 = SplatMapGradient.Evaluate( Math.Clamp( layer0 / (float)Math.Max( SplatLayerCount - 1, 1 ), 0f, 1f ) );
+					Color c1 = SplatMapGradient.Evaluate( Math.Clamp( layer1 / (float)Math.Max( SplatLayerCount - 1, 1 ), 0f, 1f ) );
+					color = Color.Lerp( c0, c1, t );
+				}
+				else
+				{
+					color = Color.Lerp( Color.FromBytes( 60, 90, 40 ), Color.FromBytes( 200, 185, 150 ), Math.Clamp( h, 0, 1 ) );
+				}
+
+				vertices[x + y * width] = new Vertex( position, normal, normal, new Vector4( 0, 0, 0, 1 ) );
+				vertices[x + y * width].Color = color.ToColor32();
+			}
+		} );
+
+		for ( int y = 0; y < height - 1; y++ )
+		{
+			for ( int x = 0; x < width - 1; x++ )
+			{
+				int a = x + y * width;
+				int b = (x + 1) + y * width;
+				int c = (x + 1) + (y + 1) * width;
+				int d = x + (y + 1) * width;
+
+				indices.Add( a );
+				indices.Add( b );
+				indices.Add( c );
+				indices.Add( a );
+				indices.Add( c );
+				indices.Add( d );
+			}
+		}
+
+		var mesh = new Mesh( _previewRenderer.MaterialOverride );
+		mesh.CreateVertexBuffer( vertices.Length, vertices );
+		mesh.CreateIndexBuffer( indices.Count, indices );
+		mesh.Bounds = BBox.FromPositionAndSize( 0, new Vector3( worldSize, worldSize, worldHeight ) );
+
+		var model = Model.Builder.AddMesh( mesh ).Create();
+
+		_previewRenderer.Model = model;
+	}
+
+	/// <summary>
+	/// Samples the blended albedo for a splat value. Works just like the exported splat map:
+	/// each layer maps to one of the assigned materials, and adjacent layers blend by the
+	/// fractional part of the splat value.
+	/// </summary>
+	Color SampleMaterialBlend( float splatValue, Vector3 position, Color32[][] pixels, int[] widths, int[] heights, float[] uvScales )
+	{
+		int count = pixels.Length;
+		if ( count == 0 ) return Color.White;
+
+		float layerPos = Math.Clamp( splatValue, 0f, count - 1f );
+		int layer0 = (int)MathF.Floor( layerPos );
+		int layer1 = Math.Min( layer0 + 1, count - 1 );
+		float t = layerPos - layer0;
+
+		Color c0 = SampleAlbedo( layer0, position, pixels, widths, heights, uvScales );
+		Color c1 = SampleAlbedo( layer1, position, pixels, widths, heights, uvScales );
+		return Color.Lerp( c0, c1, t );
+	}
+
+	Color SampleAlbedo( int layer, Vector3 position, Color32[][] pixels, int[] widths, int[] heights, float[] uvScales )
+	{
+		if ( layer < 0 || layer >= pixels.Length ) return Color.White;
+		if ( pixels is null || layer >= pixels.Length ) return Color.White;
+
+		var pixelsForLayer = pixels[layer];
+		if ( pixelsForLayer is null || pixelsForLayer.Length == 0 ) return Color.White;
+
+		int tw = widths[layer];
+		int th = heights[layer];
+		if ( tw <= 0 || th <= 0 ) return Color.White;
+
+		float uvScale = uvScales != null && uvScales.Length > layer && uvScales[layer] > 0 ? uvScales[layer] : 4f;
+
+		// Tiled UV from world position, matching how terrain materials repeat
+		float u = (position.x / uvScale) % 1f;
+		if ( u < 0f ) u += 1f;
+		float v = (position.y / uvScale) % 1f;
+		if ( v < 0f ) v += 1f;
+
+		int px = Math.Clamp( (int)(u * tw), 0, tw - 1 );
+		int py = Math.Clamp( (int)(v * th), 0, th - 1 );
+
+		int index = py * tw + px;
+		if ( index < 0 || index >= pixelsForLayer.Length ) return Color.White;
+
+		var c = pixelsForLayer[index];
+		return new Color( c.r / 255f, c.g / 255f, c.b / 255f, 1f );
+	}
+
+	float[,] BuildHeightmap( int width, int height,
+		string category,
+		string shape,
+		long seed,
+		int layerCount,
+		float minHeight,
+		float maxHeight,
+		bool domainWarping,
+		float domainWarpingSize,
+		float domainWarpingStrength,
+		int smoothingPasses,
+		float terrainPlaneScale,
+		bool riverCarving,
+		float riverFrequency,
+		float riverWidth,
+		float riverDepth,
+		float riverTurbulenceFrequency,
+		float riverTurbulenceStrength,
+		float minRiverSpacing,
+		bool stagingArea,
+		int stagingAreaSize,
+		float stagingAreaHeight,
+		float stagingAreaX,
+		float stagingAreaY )
+	{
+		var fullclass = Type.GetType( $"Sturnus.TerrainGenerationTool.{category}" );
+		if ( fullclass is null )
+		{
+			Log.Error( $"Class '{category}' not found." );
+			return null;
+		}
+		var fullclassmethod = fullclass.GetMethod( shape );
+		if ( fullclassmethod is null )
+		{
+			Log.Error( $"Method '{shape}' not found." );
+			return null;
+		}
+
+		float[,] heightmap = GenerateStackedNoise(
+			width,
+			height,
+			seed,
+			layerCount,
+			1.0f,
+			2.0f,
+			1.0f,
+			0.5f,
+			( x, y ) => (float)CallMethod( $"Sturnus.TerrainGenerationTool.{category}", shape, new object[] {
+			x, y,
+			width,
+			height,
+			seed,
+			minHeight,
+			domainWarping,
+			domainWarpingSize,
+			domainWarpingStrength
+			} ),
+			maxHeight,
+			smoothingPasses,
+			terrainPlaneScale
+		);
+
+		if ( ErosionSimulation )
+		{
+
+		}
+
+		if ( riverCarving )
+		{
+			heightmap = AddTurbulenceForRivers(
+			heightmap,
+			seed: seed,
+			riverFrequency: riverFrequency,
+			riverWidth: riverWidth,
+			riverDepth: riverDepth,
+			turbulenceFrequency: riverTurbulenceFrequency,
+			turbulenceStrength: riverTurbulenceStrength,
+			minRiverSpacing: minRiverSpacing,
+			slopeSteepness:10f,
+			terrainNoiseFrequency: 2.0f,
+			terrainNoiseAmplitude: 0.5f
+		);
+		}
+
+		if ( heightmap == null )
+		{
+			Log.Error( "Heightmap is not generated. Aborting." );
+			return null;
+		}
+
+		if ( stagingArea )
+		{
+			heightmap = AddStagingSquare(
+			heightmap,
+			stagingAreaSize,
+			stagingAreaHeight,
+			stagingAreaX,
+			stagingAreaY );
+		}
+
+		return heightmap;
 	}
 
 	public void RebuildShapes()
 	{
 		ShapeArray.DestroyChildren();
 		TerrainShapeArray.Clear();
+
+		if ( CategoryArray?.Selected is null )
+		{
+			return;
+		}
 
 		string className = $"Sturnus.TerrainGenerationTool.{TerrainCategoryEnum.GetName( TerrainCategoryEnum.GetValue( CategoryArray.Selected ) )}"; // Fully qualified name
 		string[] methods = GetMethodsFromClass( className );
@@ -818,10 +1661,45 @@ public class TerrainGenerationTool : Widget
 		SaveImage( image, previewfile );
 		Log.Info( $"HeightMap preview file generated! - {previewfile}" );
 		//Generate & Export SplatMap image
-		float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight );
+		float[,] splatmap = GenerateSplatmap( _heightmap, _splatthresholds, TerrainMaxHeight, SplatLayerCount, SplatDispersion, SplatBlendStrength );
 		SKBitmap splat = SplatmapToBitMap( splatmap, _splatcolors );
 		SaveSplatmapAsPng( splat, splatfile );
 		Log.Info( $"Splatmap file generated! - {splatfile}" );
+
+		// Split the layers across the requested number of splat maps
+		int layerCount = Math.Max( SplatLayerCount, 2 );
+		int mapCount = Math.Max( SplatMapCount, 1 );
+		for ( int m = 0; m < mapCount; m++ )
+		{
+			int startLayer = m * layerCount / mapCount;
+			int endLayer = (m + 1) * layerCount / mapCount;
+
+			var mapBitmap = new SKBitmap( splatmap.GetLength( 0 ), splatmap.GetLength( 1 ) );
+
+			for ( int y = 0; y < mapBitmap.Height; y++ )
+			{
+				for ( int x = 0; x < mapBitmap.Width; x++ )
+				{
+					float layerPos = Math.Clamp( splatmap[x, y], 0f, layerCount - 1f );
+					int layer = (int)MathF.Round( layerPos );
+
+					if ( layer >= startLayer && layer < endLayer )
+					{
+						float local = (layer - startLayer) / (float)Math.Max( endLayer - startLayer, 1 );
+						var color = SplatMapGradient.Evaluate( Math.Clamp( local, 0f, 1f ) ).ToColor32();
+						mapBitmap.SetPixel( x, y, new SKColor( color.r, color.g, color.b, color.a ) );
+					}
+					else
+					{
+						mapBitmap.SetPixel( x, y, new SKColor( 0, 0, 0, 255 ) );
+					}
+				}
+			}
+
+			string mapFile = Path.Combine( output_path, $"TerrainGenerationUtility_splatmap_{m}_{/*TerrainShapeEnumSelect*/null}{UsingDomainWarping}{UsingErosionEmulation}{UsingWaterCarving}.png" );
+			SaveSplatmapAsPng( mapBitmap, mapFile );
+			Log.Info( $"Splatmap {m} file generated! - {mapFile}" );
+		}
 
 		Log.Info( $"All export files saved! {output_path}" );
 	}
@@ -930,10 +1808,8 @@ public class TerrainGenerationTool : Widget
 				}
 
 				// Save the computed value to the heightmap
-				lock ( heightmap )
-				{
-					heightmap[x, y] += value;
-				}
+				// (each Parallel.For iteration writes its own distinct row - no lock needed)
+				heightmap[x, y] += value;
 			}
 		} );
 
@@ -976,20 +1852,31 @@ public class TerrainGenerationTool : Widget
 	// Helper method to find the maximum height in a heightmap
 	private static float FindMaxHeight( float[,] heightmap )
 	{
-		float max = float.MinValue;
 		int width = heightmap.GetLength( 0 );
 		int height = heightmap.GetLength( 1 );
 
-		for ( int y = 0; y < height; y++ )
+		float max = float.MinValue;
+		object maxLock = new object();
+
+		Parallel.For( 0, height, y =>
 		{
+			float rowMax = float.MinValue;
 			for ( int x = 0; x < width; x++ )
 			{
-				if ( heightmap[x, y] > max )
+				if ( heightmap[x, y] > rowMax )
 				{
-					max = heightmap[x, y];
+					rowMax = heightmap[x, y];
 				}
 			}
-		}
+
+			if ( rowMax > max )
+			{
+				lock ( maxLock )
+				{
+					if ( rowMax > max ) max = rowMax;
+				}
+			}
+		} );
 
 		return max;
 	}
@@ -1000,29 +1887,41 @@ public class TerrainGenerationTool : Widget
 		int width = heightmap.GetLength( 0 );
 		int height = heightmap.GetLength( 1 );
 
+		// Find the min and max values (parallel, per-row reduce)
+		object lockObject = new object();
 		float min = float.MaxValue;
 		float max = float.MinValue;
 
-		// Find the min and max values
-		for ( int y = 0; y < height; y++ )
+		Parallel.For( 0, height, y =>
 		{
+			float rowMin = float.MaxValue;
+			float rowMax = float.MinValue;
 			for ( int x = 0; x < width; x++ )
 			{
 				float value = heightmap[x, y];
-				if ( value < min ) min = value;
-				if ( value > max ) max = value;
+				if ( value < rowMin ) rowMin = value;
+				if ( value > rowMax ) rowMax = value;
 			}
-		}
 
-		// Normalize the values
+			lock ( lockObject )
+			{
+				if ( rowMin < min ) min = rowMin;
+				if ( rowMax > max ) max = rowMax;
+			}
+		} );
+
+		float range = max - min;
+		if ( range <= 0f ) range = 1f;
+
+		// Normalize the values (parallel, independent writes)
 		float[,] normalized = new float[width, height];
-		for ( int y = 0; y < height; y++ )
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
-				normalized[x, y] = (heightmap[x, y] - min) / (max - min);
+				normalized[x, y] = (heightmap[x, y] - min) / range;
 			}
-		}
+		} );
 
 		return normalized;
 	}
@@ -1049,7 +1948,7 @@ public class TerrainGenerationTool : Widget
 		float[,] riverPlacementNoise = new float[width, height];
 
 		// Generate river placement noise
-		for ( int y = 0; y < height; y++ )
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
@@ -1059,10 +1958,10 @@ public class TerrainGenerationTool : Widget
 				// Noise for river placement
 				riverPlacementNoise[x, y] = OpenSimplex2S.Noise2( seed, nx * riverFrequency, ny * riverFrequency );
 			}
-		}
+		} );
 
 		// Process heightmap with river carving
-		for ( int y = 0; y < height; y++ )
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
@@ -1096,10 +1995,10 @@ public class TerrainGenerationTool : Widget
 					newHeightmap[x, y] += (minRiverSpacing - riverNoise) * 0.05f;
 				}
 			}
-		}
+		} );
 
 		// Add base noise to the entire heightmap after carving
-		for ( int y = 0; y < height; y++ )
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
@@ -1113,7 +2012,7 @@ public class TerrainGenerationTool : Widget
 				// Add noise to the heightmap
 				newHeightmap[x, y] = MathF.Max( 0, newHeightmap[x, y] + baseNoise );
 			}
-		}
+		} );
 
 		return newHeightmap;
 	}
@@ -1127,7 +2026,7 @@ public class TerrainGenerationTool : Widget
 
 		for ( int pass = 0; pass < smoothingPasses; pass++ )
 		{
-			for ( int y = 0; y < height; y++ )
+			Parallel.For( 0, height, y =>
 			{
 				for ( int x = 0; x < width; x++ )
 				{
@@ -1152,16 +2051,16 @@ public class TerrainGenerationTool : Widget
 
 					smoothed[x, y] = sum / count;
 				}
-			}
+			} );
 
 			// Copy smoothed values back to the original heightmap for the next pass
-			for ( int y = 0; y < height; y++ )
+			Parallel.For( 0, height, y =>
 			{
 				for ( int x = 0; x < width; x++ )
 				{
 					heightmap[x, y] = smoothed[x, y];
 				}
-			}
+			} );
 		}
 		return smoothed;
 	}
@@ -1422,40 +2321,192 @@ public class TerrainGenerationTool : Widget
 		return reversed;
 	}
 
-	public static float[,] GenerateSplatmap( float[,] heightmap, float[] thresholds, float maxHeight )
+	public static float[,] GenerateSplatmap( float[,] heightmap, float[] thresholds, float maxHeight, int layerCount = -1, SplatDispersionMode dispersion = SplatDispersionMode.Evenly, float blendStrength = 0.35f )
 	{
 		int width = heightmap.GetLength( 0 );
 		int height = heightmap.GetLength( 1 );
+
+		int layers = layerCount > 0 ? layerCount : Math.Max( thresholds.Length, 2 );
 		float[,] splatmap = new float[width, height];
 
-		for ( int y = 0; y < height; y++ )
+		// Build normalized height bounds from the data itself (robust to maxHeight being lower than peaks)
+		float minH = float.MaxValue, maxH = float.MinValue;
+		object minMaxLock = new object();
+
+		Parallel.For( 0, height, y =>
+		{
+			float rowMin = float.MaxValue;
+			float rowMax = float.MinValue;
+			for ( int x = 0; x < width; x++ )
+			{
+				if ( heightmap[x, y] < rowMin ) rowMin = heightmap[x, y];
+				if ( heightmap[x, y] > rowMax ) rowMax = heightmap[x, y];
+			}
+
+			lock ( minMaxLock )
+			{
+				if ( rowMin < minH ) minH = rowMin;
+				if ( rowMax > maxH ) maxH = rowMax;
+			}
+		} );
+
+		float range = MathF.Max( maxH - minH, 0.0001f );
+
+		// Thresholds are the height positions of each color stop in [0,1].
+		// Evenly mode uses equally spaced stops; Natural mode uses a slope-weighted
+		// distribution so colors bunch on flat/common terrain and spread on steep slopes.
+		float[] stops = thresholds;
+		if ( dispersion == SplatDispersionMode.Natural )
+		{
+			stops = ComputeNaturalThresholds( heightmap, layers );
+		}
+
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
-				// Normalize height value relative to the maximum height
-				float normalizedHeight = heightmap[x, y] / maxHeight;
+				// Normalized height in [0,1]
+				float normalizedHeight = Math.Clamp( (heightmap[x, y] - minH) / range, 0f, 1f );
 
-				// Interpolate between thresholds for smoother transitions
-				for ( int i = 0; i < thresholds.Length - 1; i++ )
+				// Interpolated layer position from the color stop positions
+				float layerPos = HeightToLayer( normalizedHeight, stops );
+
+				// Soft snap to the nearest layer governed by blend strength
+				float center = MathF.Round( layerPos );
+				float distance = layerPos - center;
+
+				float factor;
+				if ( MathF.Abs( distance ) <= blendStrength * 0.5f )
 				{
-					if ( normalizedHeight >= thresholds[i] && normalizedHeight <= thresholds[i + 1] )
-					{
-						// Linear interpolation between the two layers
-						float t = (normalizedHeight - thresholds[i]) / (thresholds[i + 1] - thresholds[i]);
-						splatmap[x, y] = i + t; // Interpolated layer index
-						break;
-					}
+					factor = layerPos;
+				}
+				else
+				{
+					factor = center;
 				}
 
-				// Assign the last layer if above the highest threshold
-				if ( normalizedHeight > thresholds[thresholds.Length - 1] )
-				{
-					splatmap[x, y] = thresholds.Length - 1;
-				}
+				splatmap[x, y] = Math.Clamp( factor, 0f, layers - 1 );
+			}
+		} );
+
+		return splatmap;
+	}
+
+	static float HeightToLayer( float normalizedHeight, float[] stops )
+	{
+		int count = stops.Length;
+		if ( count <= 1 ) return 0f;
+		if ( normalizedHeight <= stops[0] ) return 0f;
+		if ( normalizedHeight >= stops[count - 1] ) return count - 1f;
+
+		for ( int i = 0; i < count - 1; i++ )
+		{
+			if ( normalizedHeight >= stops[i] && normalizedHeight <= stops[i + 1] )
+			{
+				float t = (normalizedHeight - stops[i]) / MathF.Max( stops[i + 1] - stops[i], 0.0001f );
+				return i + t;
 			}
 		}
 
-		return splatmap;
+		return count - 1f;
+	}
+
+	/// <summary>
+	/// Places color stop thresholds based on the terrain's slope-weighted height distribution.
+	/// Flat, common heights get many stops (lots of color blending); steep, rare heights get few
+	/// stops (few color changes), matching how terrain materials naturally appear.
+	/// </summary>
+	static float[] ComputeNaturalThresholds( float[,] heightmap, int layerCount )
+	{
+		int width = heightmap.GetLength( 0 );
+		int height = heightmap.GetLength( 1 );
+
+		float minH = float.MaxValue, maxH = float.MinValue;
+		object minMaxLock = new object();
+
+		Parallel.For( 0, height, y =>
+		{
+			float rowMin = float.MaxValue;
+			float rowMax = float.MinValue;
+			for ( int x = 0; x < width; x++ )
+			{
+				if ( heightmap[x, y] < rowMin ) rowMin = heightmap[x, y];
+				if ( heightmap[x, y] > rowMax ) rowMax = heightmap[x, y];
+			}
+
+			lock ( minMaxLock )
+			{
+				if ( rowMin < minH ) minH = rowMin;
+				if ( rowMax > maxH ) maxH = rowMax;
+			}
+		} );
+		float range = MathF.Max( maxH - minH, 0.0001f );
+
+		// Histogram of normalized heights, weighted by flatness (1 - slope).
+		// Use a per-thread local histogram, then merge, to avoid lock contention.
+		const int bins = 128;
+		float[] hist = new float[bins];
+
+		Parallel.For( 0, height, y =>
+		{
+			float[] localHist = new float[bins];
+
+			for ( int x = 0; x < width; x++ )
+			{
+				float h = heightmap[x, y];
+
+				float hL = heightmap[Math.Max( x - 1, 0 ), y];
+				float hR = heightmap[Math.Min( x + 1, width - 1 ), y];
+				float hD = heightmap[x, Math.Max( y - 1, 0 )];
+				float hU = heightmap[x, Math.Min( y + 1, height - 1 )];
+
+				float localDiff = (MathF.Abs( hR - hL ) + MathF.Abs( hU - hD )) * 0.5f;
+				float slope = Math.Clamp( localDiff / MathF.Max( range * 0.1f, 0.0001f ), 0f, 1f );
+
+				float weight = MathF.Max( 1f - slope, 0.05f );
+				float normalizedHeight = Math.Clamp( (h - minH) / range, 0f, 1f );
+				int bin = Math.Clamp( (int)(normalizedHeight * (bins - 1)), 0, bins - 1 );
+				localHist[bin] += weight;
+			}
+
+			lock ( minMaxLock )
+			{
+				for ( int i = 0; i < bins; i++ ) hist[i] += localHist[i];
+			}
+		} );
+
+		// Cumulative distribution
+		float total = hist.Sum();
+		if ( total <= 0f )
+		{
+			total = 1f;
+			for ( int i = 0; i < bins; i++ ) hist[i] = 1f;
+		}
+
+		float[] thresholds = new float[layerCount];
+		thresholds[0] = 0f;
+		thresholds[layerCount - 1] = 1f;
+
+		float cum = 0f;
+		int binIndex = 0;
+		for ( int i = 1; i < layerCount - 1; i++ )
+		{
+			float target = (i / (float)(layerCount - 1)) * total;
+			while ( binIndex < bins - 1 && cum < target )
+			{
+				cum += hist[binIndex];
+				binIndex++;
+			}
+			thresholds[i] = binIndex / (float)(bins - 1);
+		}
+
+		// Ensure monotonic
+		for ( int i = 1; i < layerCount; i++ )
+		{
+			thresholds[i] = MathF.Max( thresholds[i], thresholds[i - 1] );
+		}
+
+		return thresholds;
 	}
 
 	public static SKBitmap SplatmapToBitMap( float[,] splatmap, SKColor[] colors )
@@ -1464,18 +2515,28 @@ public class TerrainGenerationTool : Widget
 		int height = splatmap.GetLength( 1 );
 		SKBitmap bitmap = new SKBitmap( width, height );
 
-		for ( int y = 0; y < height; y++ )
+		Parallel.For( 0, height, y =>
 		{
 			for ( int x = 0; x < width; x++ )
 			{
-				// Map the splatmap value to a valid layer index
-				int layer = (int)Math.Clamp( splatmap[x, y], 0, colors.Length - 1 );
+				// Map the splatmap value to a valid layer position
+				float layerPos = Math.Clamp( splatmap[x, y], 0f, colors.Length - 1f );
+				int layer0 = (int)MathF.Floor( layerPos );
+				int layer1 = Math.Min( layer0 + 1, colors.Length - 1 );
+				float t = layerPos - layer0;
 
-				// Assign the corresponding color
-				SKColor color = colors[layer];
+				// Blend between the two nearest layer colors
+				var c0 = colors[layer0];
+				var c1 = colors[layer1];
+				var color = new SKColor(
+					(byte)MathX.LerpTo( c0.Red, c1.Red, t ),
+					(byte)MathX.LerpTo( c0.Green, c1.Green, t ),
+					(byte)MathX.LerpTo( c0.Blue, c1.Blue, t ),
+					(byte)MathX.LerpTo( c0.Alpha, c1.Alpha, t ) );
+
 				bitmap.SetPixel( x, y, color );
 			}
-		}
+		} );
 
 		return bitmap;
 	}
@@ -1528,3 +2589,185 @@ public class TerrainGenerationTool : Widget
 		data.SaveTo( stream );
 	}
 }
+
+/// <summary>
+/// An icon + label picker whose options wrap onto multiple lines.
+/// Mimics the interface of <see cref="Editor.SegmentedControl"/> (AddOption, Selected, SelectedIndex, OnSelectedChanged).
+/// </summary>
+public class WrapSelector : Widget
+{
+	readonly List<WrapOption> _buttons = new();
+	readonly List<string> _names = new();
+
+	public string Selected
+	{
+		get
+		{
+			for ( int i = 0; i < _buttons.Count; i++ )
+			{
+				if ( _buttons[i].IsActive )
+					return _names[i];
+			}
+			return null;
+		}
+		set
+		{
+			SetSelected( value );
+		}
+	}
+
+	public int SelectedIndex
+	{
+		get
+		{
+			for ( int i = 0; i < _buttons.Count; i++ )
+			{
+				if ( _buttons[i].IsActive )
+					return i;
+			}
+			return -1;
+		}
+		set
+		{
+			if ( value >= 0 && value < _names.Count )
+				SetSelected( _names[value] );
+		}
+	}
+
+	public Action<string> OnSelectedChanged { get; set; }
+
+	public WrapSelector( Widget parent = null ) : base( parent )
+	{
+		Layout = Layout.Row();
+		Layout.Spacing = 4;
+		SetSizeMode( SizeMode.CanGrow, SizeMode.CanGrow );
+		HorizontalSizeMode = SizeMode.Flexible;
+	}
+
+	public void AddOption( string name, string icon = null, int? count = null, string label = null )
+	{
+		if ( _names.Contains( name ) ) return;
+
+		if ( string.IsNullOrEmpty( name ) )
+		{
+			// Special "clear" option, shown with the close icon
+			icon ??= "close";
+		}
+		else
+		{
+			icon ??= IconFor( name );
+		}
+
+		var option = new WrapOption( this, label ?? (string.IsNullOrEmpty( name ) ? "Clear" : name), icon );
+		option.IsActive = false;
+		option.MouseLeftPress = () => SetSelected( name );
+
+		_names.Add( name );
+		_buttons.Add( option );
+		Layout.Add( option );
+	}
+
+	public bool HasOption( string name ) => _names.Contains( name );
+
+	public new void DestroyChildren()
+	{
+		foreach ( var b in _buttons )
+		{
+			if ( b.IsValid() )
+				b.Destroy();
+		}
+		_buttons.Clear();
+		_names.Clear();
+	}
+
+	void SetSelected( string name )
+	{
+		bool changed = Selected != name;
+
+		for ( int i = 0; i < _buttons.Count; i++ )
+		{
+			_buttons[i].IsActive = _names[i] == name;
+		}
+
+		if ( changed )
+		{
+			OnSelectedChanged?.Invoke( name );
+		}
+	}
+
+	static string IconFor( string name )
+	{
+		switch ( name )
+		{
+			case "Islands": return "landscape";
+			case "Mountainous": return "terrain";
+			case "Planetary": return "public";
+			case "Realistic": return "photo";
+			case "Sea": return "water";
+			case "Volcanic": return "volcano";
+			case "Default": return "shapes";
+			case "Archipelagos": return "scatter_plot";
+			case "Atoll": return "crop_square";
+			case "Islets": return "blur_on";
+			case "Oceanic": return "waves";
+			case "Cliff": return "terrain";
+			case "Craters": return "brightness_low";
+			case "Hills": return "landscape";
+			case "Plateau": return "square_foot";
+			case "SeaBed": return "water";
+			case "Sharded": return "dashboard";
+			default: return "shapes";
+		}
+	}
+}
+
+/// <summary>
+/// A single option in a <see cref="WrapSelector"/>: an icon with a text label underneath.
+/// </summary>
+public class WrapOption : Widget
+{
+	public string Icon { get; }
+	public string Text { get; }
+	public bool IsActive { get; set; }
+
+	public WrapOption( Widget parent, string text, string icon ) : base( parent )
+	{
+		Text = text;
+		Icon = icon;
+		Cursor = CursorShape.Finger;
+		ToolTip = text;
+		MinimumSize = new Vector2( 52, 44 );
+	}
+
+	protected override Vector2 SizeHint()
+	{
+		Paint.SetDefaultFont( 7 );
+		var textRect = Paint.MeasureText( new Rect( 0, 0, 60, 100 ), Text, TextFlag.WordWrap );
+		return new Vector2( MathF.Max( textRect.Size.x + 10, 52 ), textRect.Size.y + 24 );
+	}
+
+	protected override void OnPaint()
+	{
+		base.OnPaint();
+
+		Paint.Antialiasing = true;
+		Paint.ClearPen();
+
+		var rect = LocalRect;
+
+		var background = IsActive ? Theme.Primary.WithAlpha( 0.25f ) : Theme.ControlBackground.WithAlpha( 0.6f );
+		if ( Paint.HasMouseOver ) background = background.Lighten( 0.1f );
+		Paint.SetBrush( background );
+		Paint.DrawRect( rect, Theme.ControlRadius );
+
+		var iconRect = new Rect( rect.Left, rect.Top + 4, rect.Width, rect.Height * 0.55f );
+		var color = IsActive ? Theme.Primary : Theme.Text.WithAlpha( 0.8f );
+		Paint.SetPen( color );
+		Paint.DrawIcon( iconRect, Icon, 18, TextFlag.Center );
+
+		var textRect = new Rect( rect.Left + 2, rect.Top + rect.Height * 0.55f, rect.Width - 4, rect.Height * 0.45f );
+		Paint.SetDefaultFont( 7 );
+		Paint.DrawText( textRect, Text, TextFlag.Center | TextFlag.WordWrap );
+	}
+}
+
